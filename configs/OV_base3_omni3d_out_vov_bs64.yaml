@@ -67,7 +67,7 @@ MODEL:
         POSE_WEIGHT: 0.25
         DIM_WEIGHT: 0.25
         DEPTH_WEIGHT: 0.25
-        UV_WEIGHT: 20.0
+        UV_WEIGHT: 2.0
         DET_2D_L1_WEIGHT: 2.0
         DET_2D_IOU_WEIGHT: 2.0
 

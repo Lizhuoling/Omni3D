@@ -85,18 +85,19 @@ class HungarianAssigner3D(BaseAssigner):
         uncern_preds = bbox_preds[..., reg_key_manager('uncern')] # Left shape: (num_query, 1)
         uncern_preds = torch.clamp(uncern_preds, min = self.uncern_range[0],  max = self.uncern_range[1])
         
-        cls_gts = gt_instance.get('gt_classes').to(device) # Left shape: (num_gt,)
-        loc_gts = gt_instance.get('gt_boxes3D')[..., 6:9].to(device) # Left shape: (num_gt, 3)
-        dim_gts = gt_instance.get('gt_boxes3D')[..., 3:6].to(device) # Left shape: (num_gt, 3)
-        pose_gts = gt_instance.get('gt_poses').to(device) # Left shape: (num_gt, 3, 3)
+        cls_gts = gt_instance.get('gt_classes').to(device).clone() # Left shape: (num_gt,)
+        loc_gts = gt_instance.get('gt_boxes3D')[..., 6:9].to(device).clone() # Left shape: (num_gt, 3)
+        dim_gts = gt_instance.get('gt_boxes3D')[..., 3:6].to(device).clone() # Left shape: (num_gt, 3)
+        pose_gts = gt_instance.get('gt_poses').to(device).clone() # Left shape: (num_gt, 3, 3)
 
-        uvd_gts = gt_instance.get('gt_boxes3D')[..., 0:3].to(device) # Left shape: (num_gt, 3)
+        uvd_gts = gt_instance.get('gt_boxes3D')[..., 0:3].to(device).clone() # Left shape: (num_gt, 3)
         
-        uvd_gts[:, :2] = uvd_gts[:, :2] / ori_img_resolution    # Normalize projected 3D centers.
+        uv_gts = uvd_gts[:, :2].clone() / ori_img_resolution    # Normalize projected 3D centers.
+        depth_gts = uvd_gts[:, 2:3].clone()
         if self.cfg.MODEL.DETECTOR3D.PETR.HEAD.VIRTUAL_DEPTH:
             virtual_focal_y = self.cfg.MODEL.DETECTOR3D.PETR.HEAD.VIRTUAL_FOCAL_Y
             augmented_focal_y = Ks[1][1]
-            uvd_gts[:, 2:3] = uvd_gts[:, 2:3] * virtual_focal_y / augmented_focal_y
+            depth_gts = depth_gts * virtual_focal_y / augmented_focal_y
             
         if self.cfg.MODEL.DETECTOR3D.PETR.HEAD.PERFORM_2D_DET:
             det2d_xywh_preds = bbox_preds[..., reg_key_manager('det2d_xywh')] # Left shape: (num_query, 4)
@@ -117,8 +118,8 @@ class HungarianAssigner3D(BaseAssigner):
         loc_xyz_preds = loc_preds.clone()
         loc_uv_preds = clone_loc_preds[:, :2].unsqueeze(1).expand(-1, num_gts, -1) # Left shape: (num_query, num_gt, 2)
         loc_d_preds = clone_loc_preds[:, 2:3].unsqueeze(1).expand(-1, num_gts, -1) # Left shape: (num_query, num_gt, 1)
-        loc_uv_gts = uvd_gts[:, :2][None].expand(num_preds, -1, -1) # Left shape: (num_query, num_gt, 2)
-        loc_d_gts = uvd_gts[:, 2:3][None].expand(num_preds, -1, -1) # Left shape: (num_query, num_gt, 1)
+        loc_uv_gts = uv_gts[None].expand(num_preds, -1, -1) # Left shape: (num_query, num_gt, 2)
+        loc_d_gts = depth_gts[None].expand(num_preds, -1, -1) # Left shape: (num_query, num_gt, 1)
         loc_xyz_preds[:, :2] = loc_xyz_preds[:, :2] * loc_xyz_preds[:, 2:]  # Left shape: (num_query, 3)
         loc_xyz_preds = (Ks.inverse().unsqueeze(0) @ loc_xyz_preds.unsqueeze(-1)).squeeze(-1)   # Left shape: (num_query, 3)
         loc_xyz_preds = loc_xyz_preds.unsqueeze(1).expand(-1, num_gts, -1)  # Left shape: (num_query, num_gt, 3)
@@ -128,6 +129,7 @@ class HungarianAssigner3D(BaseAssigner):
         depth_cost = self.cfg.MODEL.DETECTOR3D.PETR.HEAD.DEPTH_WEIGHT * self.reg_loss(loc_d_preds, loc_d_gts).squeeze(-1)
         # Loc loss
         uncern_preds = uncern_preds.unsqueeze(1).expand(-1, num_gts, -1)  # Left shape: (num_query, num_gt, 1)
+        loc_xyz_gts = loc_gts[None].expand(num_preds, -1, -1)   # Left shape: (num_query, num_gt, 3)
         loc_cost = self.cfg.MODEL.DETECTOR3D.PETR.HEAD.LOC_WEIGHT * (math.sqrt(2) * self.reg_loss(loc_xyz_preds, loc_gts).sum(-1, keepdim=True) / uncern_preds.exp() + uncern_preds).squeeze(-1) # Left shape: (num_query, num_gt)
             
         dim_preds = dim_preds.unsqueeze(1).expand(-1, num_gts, -1)  # Left shape: (num_query, num_gt, 3)
@@ -137,7 +139,7 @@ class HungarianAssigner3D(BaseAssigner):
         pose_preds = pose_preds.unsqueeze(1).expand(-1, num_gts, -1, -1).reshape(num_preds * num_gts, 3, 3)    # Left shape: (num_query, num_gt, 3, 3)
         pose_gts = pose_gts[None].expand(num_preds, -1, -1, -1).reshape(num_preds * num_gts, 3, 3) # Left shape: (num_query, num_gt, 3, 3)
         cost_pose = self.cfg.MODEL.DETECTOR3D.PETR.HEAD.POSE_WEIGHT * (1-so3_relative_angle(pose_preds, pose_gts, eps=0.1, cos_angle=True)).view(num_preds, num_gts)  # Left shape: (num_query, num_gt)
-
+        
         if self.cfg.MODEL.DETECTOR3D.PETR.HEAD.PERFORM_2D_DET:
             det2d_reg_loss = self.cfg.MODEL.DETECTOR3D.PETR.HEAD.DET_2D_L1_WEIGHT * self.reg_loss(det2d_xywh_preds[:, None].expand(-1, num_gts, -1), 
                 det2d_xywh_gts[None].expand(num_preds, -1, -1)).sum(-1)  # Left shape: (num_query, num_gt)

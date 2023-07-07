@@ -498,7 +498,7 @@ class PETR_HEAD(nn.Module):
             reference = inverse_sigmoid(reference_points.clone())
             dec_reg_result[..., self.reg_key_manager('loc')][..., :2] += reference[..., 0:2]
             dec_reg_result[..., self.reg_key_manager('loc')][..., :2] = dec_reg_result[..., self.reg_key_manager('loc')][..., :2].sigmoid()
-            dec_reg_result[..., self.reg_key_manager('loc')][..., 2:3] = dec_reg_result[..., self.reg_key_manager('loc')][..., 2:3] * self.max_depth
+            dec_reg_result[..., self.reg_key_manager('loc')][..., 2:3] = dec_reg_result[..., self.reg_key_manager('loc')][..., 2:3].sigmoid() * self.max_depth
 
 
             outputs_classes.append(dot_product_logit)  # Left shape: (B, num_query, cls_num)
@@ -675,14 +675,15 @@ class PETR_HEAD(nn.Module):
             bs_loc_gts = bs_gt_instance.get('gt_boxes3D')[..., 6:9].to(device)[gt_idxs] # Left shape: (num_gt, 3)
             bs_dim_gts = bs_gt_instance.get('gt_boxes3D')[..., 3:6].to(device)[gt_idxs] # Left shape: (num_gt, 3)
             bs_pose_gts = bs_gt_instance.get('gt_poses').to(device)[gt_idxs] # Left shape: (num_gt, 3, 3)
-
             bs_uvd_gts = bs_gt_instance.get('gt_boxes3D')[..., 0:3].to(device)[gt_idxs] # Left shape: (num_gt, 3)
-            bs_uvd_gts[:, :2] = bs_uvd_gts[:, :2] / ori_img_resolution[bs][None]
+            
+            bs_uv_gts = bs_uvd_gts[:, :2].clone() / ori_img_resolution[bs][None]
             if self.cfg.MODEL.DETECTOR3D.PETR.HEAD.VIRTUAL_DEPTH:
                 virtual_focal_y = self.cfg.MODEL.DETECTOR3D.PETR.HEAD.VIRTUAL_FOCAL_Y
                 augmented_focal_y = Ks_list[bs][1][1]
-                bs_uvd_gts[:, 2:3] = bs_uvd_gts[:, 2:3] * virtual_focal_y / augmented_focal_y
-                    
+                bs_depth_gts = bs_uvd_gts[:, 2:3].clone() * virtual_focal_y / augmented_focal_y
+             
+            # Transform (u, v, d) to (x, y, z)
             bs_loc_xyz_preds = bs_loc_preds.clone() # Left shape: (num_gt, 3)
             bs_loc_xyz_preds = torch.cat((bs_loc_xyz_preds[:, :2] * bs_loc_xyz_preds[:, 2:3], bs_loc_xyz_preds[:, 2:3]), dim = 1)
             bs_loc_xyz_preds = (Ks_list[bs].inverse().unsqueeze(0) @ bs_loc_xyz_preds.unsqueeze(-1)).squeeze(-1)    # Left shape: (num_gt, 3)
@@ -703,14 +704,14 @@ class PETR_HEAD(nn.Module):
             Ks = torch.Tensor(np.array(batched_inputs[bs]['K'])).cuda()
             Ks[0, :] = Ks[0, :] * ori_img_resolution[bs][0] / initial_w
             Ks[1, :] = Ks[1, :] * ori_img_resolution[bs][1] / initial_h
-            corners_2d, corners_3d = get_cuboid_verts(K = Ks, box3d = torch.cat((bs_loc_preds, bs_dim_preds.exp()), dim = 1), R = bs_pose_gts)
+            corners_2d, corners_3d = get_cuboid_verts(K = Ks, box3d = torch.cat((bs_loc_gts, bs_dim_gts), dim = 1), R = bs_pose_gts)
             corners_2d = corners_2d[:, :, :2].detach()
             box2d = torch.cat((corners_2d.min(dim = 1)[0], corners_2d.max(dim = 1)[0]), dim = -1)
             for box in box2d:
                 box = box.detach().cpu().numpy().astype(np.int32)
                 cv2.rectangle(img, (box[0], box[1]), (box[2], box[3]), (0, 0, 255), 2)
-            for idx in range(bs_loc_preds.shape[0]):
-                draw_3d_box(img, Ks.cpu().numpy(), torch.cat((bs_loc_preds[idx].detach().cpu(), bs_dim_preds[idx].exp().detach().cpu()), dim = 0).numpy(), bs_pose_preds[idx].detach().cpu().numpy())
+            for idx in range(bs_loc_gts.shape[0]):
+                draw_3d_box(img, Ks.cpu().numpy(), torch.cat((bs_loc_gts[idx].detach().cpu(), bs_dim_gts[idx].detach().cpu()), dim = 0).numpy(), bs_pose_gts[idx].detach().cpu().numpy())
             gt_boxes3D = batched_inputs[bs]['instances']._fields['gt_boxes3D']
             gt_proj_centers = gt_boxes3D[:, 0:2]    # The projected 3D centers have been resized.
             for gt_proj_center in gt_proj_centers:
@@ -726,8 +727,8 @@ class PETR_HEAD(nn.Module):
             loss_dict['cls_loss_{}'.format(dec_idx)] += self.cfg.MODEL.DETECTOR3D.PETR.HEAD.CLS_WEIGHT * torchvision.ops.sigmoid_focal_loss(bs_cls_scores, bs_cls_gts_onehot.float(), reduction = 'none').sum()
             
             # Localization loss
-            loss_dict['loc_uv_loss_{}'.format(dec_idx)] += self.cfg.MODEL.DETECTOR3D.PETR.HEAD.UV_WEIGHT * self.reg_loss(bs_loc_preds[:, :2], bs_uvd_gts[:, :2]).sum()
-            loss_dict['loc_d_loss_{}'.format(dec_idx)] += self.cfg.MODEL.DETECTOR3D.PETR.HEAD.DEPTH_WEIGHT * self.reg_loss(bs_loc_preds[:, 2:3], bs_uvd_gts[:, 2:3]).sum()
+            loss_dict['loc_uv_loss_{}'.format(dec_idx)] += self.cfg.MODEL.DETECTOR3D.PETR.HEAD.UV_WEIGHT * self.reg_loss(bs_loc_preds[:, :2], bs_uv_gts).sum()
+            loss_dict['loc_d_loss_{}'.format(dec_idx)] += self.cfg.MODEL.DETECTOR3D.PETR.HEAD.DEPTH_WEIGHT * self.reg_loss(bs_loc_preds[:, 2:3], bs_depth_gts).sum()
                 
             loss_dict['loc_loss_{}'.format(dec_idx)] += self.cfg.MODEL.DETECTOR3D.PETR.HEAD.LOC_WEIGHT * (math.sqrt(2) * self.reg_loss(bs_loc_xyz_preds, bs_loc_gts)\
                                                         .sum(-1, keepdim=True) / bs_uncern_preds.exp() + bs_uncern_preds).sum()
