@@ -29,6 +29,7 @@ from cubercnn.util.util import Converter_key2channel
 from cubercnn.util import torch_dist
 from cubercnn import util as cubercnn_util
 from cubercnn.modeling.detector3d.detr_transformer import build_detr_transformer
+#from cubercnn.modeling.detector3d.deformable_transformer import build_deformable_transformer
 from cubercnn.util.util import box_cxcywh_to_xyxy, generalized_box_iou 
 from cubercnn.util.position_encoding import SinePositionalEncoding
 from cubercnn.util.math_util import get_cuboid_verts
@@ -250,6 +251,22 @@ def transformer_cfgs(transformer_name, cfg):
             pre_norm=False,
             use_flash_attn = cfg.MODEL.DETECTOR3D.PETR.FLASH_ATTN,
         ),
+        DEFORMABLE_TRANSFORMER = dict(
+            d_model = 256,
+            nhead = 8,
+            num_encoder_layers = 0,
+            num_decoder_layers = 6,
+            dim_feedforward = 2048,
+            dropout = 0.0,
+            activation = "relu",
+            return_intermediate_dec=True,
+            num_feature_levels=4,
+            dec_n_points=4,
+            enc_n_points=4,
+            two_stage=False,
+            two_stage_num_proposals=cfg.MODEL.DETECTOR3D.PETR.NUM_QUERY,
+            use_dab=False,
+        ),
     )
 
     return cfgs[transformer_name]
@@ -324,6 +341,8 @@ class PETR_HEAD(nn.Module):
             self.transformer = build_transformer(transformer_cfg)
         elif cfg.MODEL.DETECTOR3D.PETR.TRANSFORMER_NAME == 'DETR_TRANSFORMER':
             self.transformer = build_detr_transformer(**transformer_cfg)
+        elif cfg.MODEL.DETECTOR3D.PETR.TRANSFORMER_NAME == 'DEFORMABLE_TRANSFORMER':
+            self.transformer = build_deformable_transformer(**transformer_cfg)
         self.num_decoder = 6    # Keep this variable consistent with the detr configs.
         
         # Classification head
