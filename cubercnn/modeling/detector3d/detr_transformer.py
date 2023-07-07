@@ -9,19 +9,22 @@ Copy-paste from torch.nn.Transformer with modifications:
 """
 import copy
 import pdb
+import warnings
 from typing import Optional, List
 
 import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
+from .attention import FlashMHA
 
+from mmcv.cnn.bricks.drop import build_dropout
 
 class Transformer(nn.Module):
 
     def __init__(self, d_model=512, nhead=8, num_encoder_layers=6,
                  num_decoder_layers=6, dim_feedforward=2048, dropout=0.1,
                  activation="relu", normalize_before=False,
-                 return_intermediate_dec=False, cfg = None):
+                 return_intermediate_dec=False, cfg = None, **kwargs):
         super().__init__()
 
         encoder_layer = TransformerEncoderLayer(d_model, nhead, dim_feedforward,
@@ -29,12 +32,12 @@ class Transformer(nn.Module):
         encoder_norm = nn.LayerNorm(d_model) if normalize_before else None
         self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers, encoder_norm)
 
-        decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward,
-                                                dropout, activation, normalize_before)
+        decoder_layer = TransformerDecoderLayer(d_model, nhead, dim_feedforward, dropout, \
+                activation, normalize_before, use_flash_attn = cfg.MODEL.DETECTOR3D.PETR.FLASH_ATTN)
         decoder_norm = nn.LayerNorm(d_model)
         self.decoder = TransformerDecoder(decoder_layer, num_decoder_layers, decoder_norm,
                                           return_intermediate=return_intermediate_dec)
-
+        
         self._reset_parameters()
 
         self.d_model = d_model
@@ -48,7 +51,7 @@ class Transformer(nn.Module):
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
 
-    def forward(self, src, mask, query_embed, pos_embed, reg_branch=None, batched_inputs = None, glip_visual_feat = None, glip_pos_embed = None, glip_text_feat = None):
+    def forward(self, src, mask, query_embed, pos_embed, reg_branch=None, batched_inputs = None, glip_visual_feat = None, glip_visual_pos_embed = None, glip_text_feat = None):
         # flatten NxCxHxW to HWxNxC
         bs, c, h, w = src.shape
         src = src.flatten(2).permute(2, 0, 1)   # [bs, c, h, w] -> [h*w, bs, c]
@@ -60,18 +63,14 @@ class Transformer(nn.Module):
         if self.cfg.MODEL.DETECTOR3D.PETR.GLIP_FEAT_FUSION in ('vision', 'VL'):
             _, _, glip_visual_h, glip_visual_w = glip_visual_feat.shape
             glip_visual_feat = glip_visual_feat.permute(2, 3, 0, 1).reshape(-1, bs, c)
-            glip_pos_embed = glip_pos_embed.permute(2, 3, 0, 1).reshape(-1, bs, c)
+            glip_visual_pos_embed = glip_visual_pos_embed.permute(2, 3, 0, 1).reshape(-1, bs, c)
             glip_visual_mask = mask.new_zeros((bs, glip_visual_h * glip_visual_w))
+            pdb.set_trace()
             src = torch.cat((src, glip_visual_feat), dim  = 0)    # Left shape: (L, B, C)
-            pos_embed = torch.cat((pos_embed, glip_pos_embed), dim = 0) # Left shape: (L, B, C)
+            pos_embed = torch.cat((pos_embed, glip_visual_pos_embed), dim = 0) # Left shape: (L, B, C)
             mask = torch.cat((mask, glip_visual_mask), dim = 1) # Left shape: (B, L)
 
         if self.cfg.MODEL.DETECTOR3D.PETR.GLIP_FEAT_FUSION in ('language', 'VL') and self.cfg.MODEL.DETECTOR3D.PETR.TEXT_FUSION_POSITION == 'before':
-            prev_decs, last_dec = out_dec[:-1], out_dec[-1] # prev_decs shape: (num_dec - 1, L, B, C), last_dec shape: (L, B, C)
-            last_dec = self.glip_text_decoderlayer(last_dec, glip_text_feat, query_pos = query_embed)
-            out_dec = torch.cat((prev_decs, last_dec[None]), dim  = 0)  # Left shape: (num_dec, L, B, C)
-
-        if self.cfg.MODEL.DETECTOR3D.PETR.GLIP_FEAT_FUSION in ('language', 'VL') and self.cfg.MODEL.DETECTOR3D.PETR.TEXT_FUSION_POSITION == 'after':
             prev_decs, last_dec = out_dec[:-1], out_dec[-1] # prev_decs shape: (num_dec - 1, L, B, C), last_dec shape: (L, B, C)
             last_dec = self.glip_text_decoderlayer(last_dec, glip_text_feat, query_pos = query_embed)
             out_dec = torch.cat((prev_decs, last_dec[None]), dim  = 0)  # Left shape: (num_dec, L, B, C)
@@ -219,10 +218,14 @@ class TransformerEncoderLayer(nn.Module):
 class TransformerDecoderLayer(nn.Module):
 
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1,
-                 activation="relu", normalize_before=False):
+                 activation="relu", normalize_before=False, use_flash_attn = False):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(embed_dim=d_model, num_heads=nhead, dropout=dropout)
-        self.multihead_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+
+        if use_flash_attn:
+            self.multihead_attn = PETRMultiheadFlashAttention(d_model, nhead, dropout=dropout)
+        else:
+            self.multihead_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
         # Implementation of Feedforward model
         self.linear1 = nn.Linear(d_model, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
@@ -302,11 +305,149 @@ class TransformerDecoderLayer(nn.Module):
                                  tgt_key_padding_mask, memory_key_padding_mask, pos, query_pos)
 
 
+class PETRMultiheadFlashAttention(nn.Module):
+    """A wrapper for ``torch.nn.MultiheadAttention``.
+    This module implements MultiheadAttention with identity connection,
+    and positional encoding  is also passed as input.
+    Args:
+        embed_dims (int): The embedding dimension.
+        num_heads (int): Parallel attention heads.
+        attn_drop (float): A Dropout layer on attn_output_weights.
+            Default: 0.0.
+        proj_drop (float): A Dropout layer after `nn.MultiheadAttention`.
+            Default: 0.0.
+        dropout_layer (obj:`ConfigDict`): The dropout_layer used
+            when adding the shortcut.
+        init_cfg (obj:`mmcv.ConfigDict`): The Config for initialization.
+            Default: None.
+        batch_first (bool): When it is True,  Key, Query and Value are shape of
+            (batch, n, embed_dim), otherwise (n, batch, embed_dim).
+             Default to False.
+    """
+
+    def __init__(self,
+                 embed_dims,
+                 num_heads,
+                 attn_drop=0.,
+                 proj_drop=0.,
+                 dropout_layer=dict(type='Dropout', drop_prob=0.),
+                 init_cfg=None,
+                 batch_first=True,
+                 **kwargs):
+        super(PETRMultiheadFlashAttention, self).__init__()
+        if 'dropout' in kwargs:
+            warnings.warn(
+                'The arguments `dropout` in MultiheadAttention '
+                'has been deprecated, now you can separately '
+                'set `attn_drop`(float), proj_drop(float), '
+                'and `dropout_layer`(dict) ', DeprecationWarning)
+            attn_drop = kwargs['dropout']
+            dropout_layer['drop_prob'] = kwargs.pop('dropout')
+
+        self.embed_dims = embed_dims
+        self.num_heads = num_heads
+        self.batch_first = True
+
+        self.attn = FlashMHA(embed_dims, num_heads, attn_drop, dtype=torch.float16, device='cuda',
+                                          **kwargs)
+
+        self.proj_drop = nn.Dropout(proj_drop)
+        self.dropout_layer = build_dropout(
+            dropout_layer) if dropout_layer else nn.Identity()
+
+    def forward(self,
+                query,
+                key=None,
+                value=None,
+                identity=None,
+                query_pos=None,
+                key_pos=None,
+                attn_mask=None,
+                key_padding_mask=None,
+                **kwargs):
+        """Forward function for `MultiheadAttention`.
+        **kwargs allow passing a more general data flow when combining
+        with other operations in `transformerlayer`.
+        Args:
+            query (Tensor): The input query with shape [num_queries, bs,
+                embed_dims] if self.batch_first is False, else
+                [bs, num_queries embed_dims].
+            key (Tensor): The key tensor with shape [num_keys, bs,
+                embed_dims] if self.batch_first is False, else
+                [bs, num_keys, embed_dims] .
+                If None, the ``query`` will be used. Defaults to None.
+            value (Tensor): The value tensor with same shape as `key`.
+                Same in `nn.MultiheadAttention.forward`. Defaults to None.
+                If None, the `key` will be used.
+            identity (Tensor): This tensor, with the same shape as x,
+                will be used for the identity link.
+                If None, `x` will be used. Defaults to None.
+            query_pos (Tensor): The positional encoding for query, with
+                the same shape as `x`. If not None, it will
+                be added to `x` before forward function. Defaults to None.
+            key_pos (Tensor): The positional encoding for `key`, with the
+                same shape as `key`. Defaults to None. If not None, it will
+                be added to `key` before forward function. If None, and
+                `query_pos` has the same shape as `key`, then `query_pos`
+                will be used for `key_pos`. Defaults to None.
+            attn_mask (Tensor): ByteTensor mask with shape [num_queries,
+                num_keys]. Same in `nn.MultiheadAttention.forward`.
+                Defaults to None.
+            key_padding_mask (Tensor): ByteTensor with shape [bs, num_keys].
+                Defaults to None.
+        Returns:
+            Tensor: forwarded results with shape
+            [num_queries, bs, embed_dims]
+            if self.batch_first is False, else
+            [bs, num_queries embed_dims].
+        """
+
+        if key is None:
+            key = query
+        if value is None:
+            value = key
+        if identity is None:
+            identity = query
+        if key_pos is None:
+            if query_pos is not None:
+                # use query_pos if key_pos is not available
+                if query_pos.shape == key.shape:
+                    key_pos = query_pos
+                else:
+                    warnings.warn(f'position encoding of key is'
+                                  f'missing in {self.__class__.__name__}.')
+        if query_pos is not None:
+            query = query + query_pos
+        if key_pos is not None:
+            key = key + key_pos
+
+        # Because the dataflow('key', 'query', 'value') of
+        # ``torch.nn.MultiheadAttention`` is (num_query, batch,
+        # embed_dims), We should adjust the shape of dataflow from
+        # batch_first (batch, num_query, embed_dims) to num_query_first
+        # (num_query ,batch, embed_dims), and recover ``attn_output``
+        # from num_query_first to batch_first.
+        if self.batch_first:
+            query = query.transpose(0, 1)
+            key = key.transpose(0, 1)
+            value = value.transpose(0, 1)
+        
+        out = self.attn(
+            q=query,
+            k=key,
+            v=value,
+            key_padding_mask=None)[0]
+
+        if self.batch_first:
+            out = out.transpose(0, 1)
+
+        return identity + self.dropout_layer(self.proj_drop(out))
+
 def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
 
-def build_detr_transformer(hidden_dim, dropout, nheads, dim_feedforward, enc_layers, dec_layers, pre_norm, cfg = None):
+def build_detr_transformer(hidden_dim, dropout, nheads, dim_feedforward, enc_layers, dec_layers, pre_norm, **kwargs):
     return Transformer(
         d_model=hidden_dim,
         dropout=dropout,
@@ -316,7 +457,7 @@ def build_detr_transformer(hidden_dim, dropout, nheads, dim_feedforward, enc_lay
         num_decoder_layers=dec_layers,
         normalize_before=pre_norm,
         return_intermediate_dec=True,
-        cfg = cfg,
+        **kwargs
     )
 
 

@@ -6,18 +6,19 @@ DATASETS:
   CATEGORY_NAMES: ('cyclist', 'pedestrian', 'trailer', 'bus', 'motorcycle', 'car', 'barrier', 'truck', 'van', 'traffic cone', 'bicycle')
 
 INPUT:
-  MIN_SIZE_TRAIN: (512,)
-  MIN_SIZE_TEST: 512
+  MIN_SIZE_TRAIN: (640,)
+  MIN_SIZE_TEST: 640
   RANDOM_FLIP: "none"
-  COLOR_AUG: False
+  COLOR_AUG: True
 
 SOLVER:
-  IMS_PER_BATCH: 64
-  TYPE: "adamw"
-  BASE_LR: 4e-4
+  IMS_PER_BATCH: 32
+  TYPE: "mmcv_AdamW"
+  BASE_LR: 2e-4
   MAX_ITER: 116000
+  VIRTUAL_EPOCH_PER_ITERATION: 5800
 
-  LR_SCHEDULER_NAME: "WarmupCosineLR"
+  LR_SCHEDULER_NAME: "CosineAnnealing"
   WARMUP_FACTOR: 0.3333
   WARMUP_ITERS: 500
   WARMUP_METHOD: "linear"
@@ -28,7 +29,7 @@ SOLVER:
     NORM_TYPE: 2.0
 
 TEST:
-  EVAL_PERIOD: 116000 #11600
+  EVAL_PERIOD: 11600
 
 MODEL:
   META_ARCHITECTURE: "OV_3D_Det"
@@ -42,7 +43,7 @@ MODEL:
       BACKBONE_NAME: 'VoVNet'
       BACKBONE_FP16: True
       NECK_NAME: 'CPFPN_VoV'
-      TRANSFORMER_NAME: 'PETR_TRANSFORMER'
+      TRANSFORMER_NAME: 'DETR_TRANSFORMER'
       MATCHER_NAME: 'HungarianAssigner3D'
       DEPTH_LID: True
       NUM_QUERY: 200
@@ -50,9 +51,6 @@ MODEL:
       HEAD:
         OV_CLS_HEAD: True
         PERFORM_2D_DET: False
-        LOC_MODE: 'uvd' # 'xyz' or 'uvd'
-        VIRTUAL_DEPTH: True
-        VIRTUAL_FOCAL_Y: 512.0
         UNCERN_RANGE: [-10, 10]
         CLS_WEIGHT: 2.0
         REG_WEIGHT: 0.25

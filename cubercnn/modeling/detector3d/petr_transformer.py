@@ -77,7 +77,7 @@ class PETRTransformer(BaseModule):
         self._is_init = True
 
 
-    def forward(self, x, mask, query_embed, pos_embed, reg_branch=None, batched_inputs = None, glip_visual_feat = None, glip_pos_embed = None, glip_text_feat = None):
+    def forward(self, x, mask, query_embed, pos_embed, reg_branch=None, batched_inputs = None, glip_visual_feat = None, glip_visual_pos_embed = None, glip_text_feat = None):
         """Forward function for `Transformer`.
         Args:
             x (Tensor): Input query with shape [bs, c, h, w] where
@@ -108,10 +108,10 @@ class PETRTransformer(BaseModule):
         if self.cfg.MODEL.DETECTOR3D.PETR.GLIP_FEAT_FUSION in ('vision', 'VL'):
             _, _, glip_visual_h, glip_visual_w = glip_visual_feat.shape
             glip_visual_feat = glip_visual_feat.permute(2, 3, 0, 1).reshape(-1, bs, c)
-            glip_pos_embed = glip_pos_embed.permute(2, 3, 0, 1).reshape(-1, bs, c)
+            glip_visual_pos_embed = glip_visual_pos_embed.permute(2, 3, 0, 1).reshape(-1, bs, c)
             glip_visual_mask = mask.new_zeros((bs, glip_visual_h * glip_visual_w))
             memory = torch.cat((memory, glip_visual_feat), dim  = 0)    # Left shape: (L, B, C)
-            pos_embed = torch.cat((pos_embed, glip_pos_embed), dim = 0) # Left shape: (L, B, C)
+            pos_embed = torch.cat((pos_embed, glip_visual_pos_embed), dim = 0) # Left shape: (L, B, C)
             mask = torch.cat((mask, glip_visual_mask), dim = 1) # Left shape: (B, L)
 
         if self.cfg.MODEL.DETECTOR3D.PETR.GLIP_FEAT_FUSION in ('language', 'VL') and self.cfg.MODEL.DETECTOR3D.PETR.TEXT_FUSION_POSITION == 'before':

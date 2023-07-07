@@ -111,6 +111,7 @@ class OV_3D_Det(nn.Module):
         self.forward_once()
 
         images = self.preprocess_image(batched_inputs)
+        ori_img_resolution = torch.Tensor([(img.shape[2], img.shape[1]) for img in images]).to(images.device)
         if self.training:
             batched_inputs = self.remove_irrelevant_gts(batched_inputs)
         # OV 2D Det
@@ -143,7 +144,7 @@ class OV_3D_Det(nn.Module):
             glip_text_emb, glip_visual_emb = None, None
         
         # 3D Det
-        detector_out = self.detector(images, batched_inputs, glip_results, self.class_name_emb, glip_text_emb, glip_visual_emb)
+        detector_out = self.detector(images, batched_inputs, glip_results, self.class_name_emb, glip_text_emb, glip_visual_emb, ori_img_resolution)
 
         # For survey the data statistics. For debug
         '''for batch in batched_inputs:
@@ -162,8 +163,6 @@ class OV_3D_Det(nn.Module):
                 self.max_range[5] = xyz[:, 2].max()
             print('max_range:', self.max_range)
         return'''
-        
-        ori_img_resolution = torch.Tensor([(img.shape[2], img.shape[1]) for img in images]).to(images.device)
         
         if self.training:
             loss_dict = self.forward_train(detector_out, batched_inputs, ori_img_resolution)
