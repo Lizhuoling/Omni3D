@@ -1,10 +1,10 @@
 _BASE_: "Base_Omni3D_demo.yaml"
 
 DATASETS:
-  #TRAIN: ('nuScenes_train', 'nuScenes_val', 'KITTI_train', 'KITTI_val')
-  TRAIN: ('KITTI_val',)
-  #TEST: ('nuScenes_test', 'KITTI_test') 
-  TEST: ('KITTI_val',)
+  TRAIN: ('nuScenes_train', 'nuScenes_val', 'KITTI_train', 'KITTI_val')
+  #TRAIN: ('KITTI_val',)
+  TEST: ('nuScenes_test', 'KITTI_test') 
+  #TEST: ('KITTI_val',)
   CATEGORY_NAMES: ('cyclist', 'pedestrian', 'trailer', 'bus', 'motorcycle', 'car', 'barrier', 'truck', 'van', 'traffic cone', 'bicycle')
 
 INPUT:
@@ -14,7 +14,7 @@ INPUT:
   COLOR_AUG: True
 
 SOLVER:
-  IMS_PER_BATCH: 2 #32
+  IMS_PER_BATCH: 32
   TYPE: "mmcv_AdamW"
   BASE_LR: 2e-4
   WEIGHT_DECAY: 1e-2

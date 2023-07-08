@@ -49,10 +49,6 @@ class DETECTOR_PETR(nn.Module):
             self.grid_mask = False
 
         backbone_cfg = backbone_cfgs(cfg.MODEL.DETECTOR3D.PETR.BACKBONE_NAME, cfg)
-        if 'EVA' in cfg.MODEL.DETECTOR3D.PETR.BACKBONE_NAME:
-            assert len(cfg.INPUT.RESIZE_TGT_SIZE) == 2
-            assert cfg.INPUT.RESIZE_TGT_SIZE[0] == cfg.INPUT.RESIZE_TGT_SIZE[1]
-            backbone_cfg['img_size'] = cfg.INPUT.RESIZE_TGT_SIZE[0]
         
         self.img_backbone = build_backbone(backbone_cfg)
         self.img_backbone.init_weights()
@@ -74,15 +70,9 @@ class DETECTOR_PETR(nn.Module):
         if type(backbone_feat_list) == dict: backbone_feat_list = list(backbone_feat_list.values())
         
         if self.cfg.MODEL.DETECTOR3D.PETR.USE_NECK:
-            feat = self.img_neck(backbone_feat_list)[0]
-        else:
-            assert 'EVA' in self.cfg.MODEL.DETECTOR3D.PETR.BACKBONE_NAME
-            patch_size = 14
-            feat_h, feat_w = self.cfg.INPUT.RESIZE_TGT_SIZE[0] // patch_size, self.cfg.INPUT.RESIZE_TGT_SIZE[1] // patch_size
-            feat = backbone_feat_list
-            feat = feat.permute(0, 2, 1).reshape(feat.shape[0], -1, feat_h, feat_w).contiguous() # Left shape: (B, C, H, W)
+            feat_list = self.img_neck(backbone_feat_list)
 
-        return feat
+        return list(feat_list)
 
     def forward(self, images, batched_inputs, glip_results, class_name_emb, glip_text_emb, glip_visual_emb, ori_img_resolution):
         Ks, scale_ratios = self.transform_intrinsics(images, batched_inputs)    # Transform the camera intrsincis based on input image augmentations.
@@ -159,7 +149,7 @@ def backbone_cfgs(backbone_name, cfg):
             type='ResNet',
             depth=50,
             num_stages=4,
-            out_indices=(2, 3,),
+            out_indices=(1, 2, 3,),
             frozen_stages=-1,
             norm_cfg=dict(type='BN2d', requires_grad=False),
             norm_eval=cfg.MODEL.DETECTOR3D.PETR.BACKBONE_NORM_EVAL,
@@ -175,20 +165,8 @@ def backbone_cfgs(backbone_name, cfg):
             norm_eval=cfg.MODEL.DETECTOR3D.PETR.BACKBONE_NORM_EVAL,
             frozen_stages=-1,
             input_ch=3,
-            out_features=('stage4','stage5',),
+            out_features=('stage3', 'stage4','stage5',),
             pretrained = 'MODEL/fcos3d_vovnet_imgbackbone_omni3d.pth',
-        ),
-        EVA_Base = dict(
-            type = 'eva02_base_patch14_xattn_fusedLN_NaiveSwiGLU_subln_RoPE',
-            pretrained = True,
-            init_ckpt = 'MODEL/eva02_B_pt_in21k_medft_in21k_ft_in1k_p14.pt',
-            use_mean_pooling = False,
-        ),
-        EVA_Large = dict(
-            type = 'eva02_large_patch14_xattn_fusedLN_NaiveSwiGLU_subln_RoPE',
-            pretrained = True,
-            init_ckpt = 'MODEL/eva02_L_pt_m38m_medft_in21k_ft_in1k_p14.pt',
-            use_mean_pooling = False,
         ),
     )
 
@@ -204,9 +182,9 @@ def neck_cfgs(neck_name):
         ),
         CPFPN_VoV = dict(
             type='CPFPN',
-            in_channels=[768, 1024],
+            in_channels=[512, 768, 1024],
             out_channels=256,
-            num_outs=2,
+            num_outs=4,
         ),
     )
 
@@ -301,14 +279,25 @@ class PETR_HEAD(nn.Module):
         self.max_depth = 232
         self.uncern_range = cfg.MODEL.DETECTOR3D.PETR.HEAD.UNCERN_RANGE
 
-        self.input_proj = Conv2d(self.in_channels, self.embed_dims, kernel_size=1)
+        self.query_embed = nn.Embedding(self.num_query, self.embed_dims)
 
+        self.num_levels = 4
+        self.input_projs = nn.ModuleList()
+        self.pos_2d_projs = nn.ModuleList()
         self.pos_2d_generator = SinePositionalEncoding(num_feats = self.embed_dims // 2, normalize = True)
-        self.pos_2d_encoder = nn.Sequential(
-            nn.Conv2d(self.embed_dims, self.embed_dims, kernel_size=1, stride=1, padding=0),
-            nn.ReLU(),
-            nn.Conv2d(self.embed_dims, self.embed_dims, kernel_size=1, stride=1, padding=0),
-        )
+        for lvl in range(self.num_levels):
+            input_proj = nn.Sequential(
+                nn.Conv2d(self.embed_dims, self.embed_dims, kernel_size=1),
+                nn.GroupNorm(32, self.embed_dims),
+            )
+            self.input_projs.append(input_proj)
+
+            pos_2d_proj = nn.Sequential(
+                nn.Conv2d(self.embed_dims, self.embed_dims, kernel_size=1, stride=1, padding=0),
+                nn.ReLU(),
+                nn.Conv2d(self.embed_dims, self.embed_dims, kernel_size=1, stride=1, padding=0),
+            )
+            self.pos_2d_projs.append(pos_2d_proj)
 
         # Generating query heads
         self.lang_dim = cfg.MODEL.GLIP_MODEL.MODEL.LANGUAGE_BACKBONE.LANG_DIM
@@ -434,14 +423,13 @@ class PETR_HEAD(nn.Module):
             nn.init.uniform_(self.reference_points.weight.data, 0, 1)
             self.reference_points.weight.requires_grad = False
 
-    def forward(self, feat, glip_results, class_name_emb, Ks, scale_ratios, masks, batched_inputs, pad_img_resolution, ori_img_resolution, glip_text_emb, glip_visual_emb):
+    def forward(self, feat_list, glip_results, class_name_emb, Ks, scale_ratios, masks, batched_inputs, pad_img_resolution, ori_img_resolution, glip_text_emb, glip_visual_emb):
         '''
         Description:
             pad_img_resolution: For the input image batch after augmentation, the resolution of the whole batch image tensor.
             ori_img_resolution: In the input image after augmentation, the resolution of valid regions (width first height next).
         '''
-        feat = self.input_proj(feat) # Left shape: (B, C, feat_h, feat_w)
-        B = feat.shape[0]
+        B = feat_list[0].shape[0]
         
         # Prepare the class name embedding following the operations in GLIP.
         if self.cfg.MODEL.DETECTOR3D.PETR.HEAD.OV_CLS_HEAD:
@@ -450,15 +438,28 @@ class PETR_HEAD(nn.Module):
             dot_product_proj_tokens = self.dot_product_projection_text(class_name_emb / 2.0) # Left shape: (cls_num, L)
             dot_product_proj_tokens_bias = torch.matmul(class_name_emb, self.bias_lang) + self.bias0 # Left shape: (cls_num)
 
-        masks = F.interpolate(masks[None], size=feat.shape[-2:])[0].to(torch.bool)  # Left shape: (B, feat_h, feat_w)
+        # Transform the various levels of input feature.
+        for lvl in range(len(feat_list)):
+            feat_list[lvl] = self.input_projs[lvl](feat_list[lvl])
+        
+        # Produce mask for various image levels.
+        mask_list = []
+        for feat in feat_list:
+            mask = F.interpolate(masks[None], size=feat.shape[-2:])[0].to(torch.bool)  # Left shape: (B, feat_h, feat_w)
+            mask_list.append(mask)
 
-        pos_embed = self.pos_2d_generator(masks) # Left shape: (B, C, H, W)
-        pos_embed = self.pos_2d_encoder(pos_embed)  # Left shape: (B, C, H, W)
+        # Produce position embedding
+        pos_emb_list = []
+        for lvl, feat in enumerate(feat_list):
+            pos_embed = self.pos_2d_generator(masks) # Left shape: (B, C, H, W)
+            pos_embed = self.pos_2d_projs[lvl](pos_embed)  # Left shape: (B, C, H, W)
+            pos_emb_list.append(pos_embed)
 
+        assert self.cfg.MODEL.GLIP_MODEL.GLIP_INITIALIZE_QUERY == False, "The reference point precision problem caused by sigmoid has not been addressed!"
         if self.cfg.MODEL.GLIP_MODEL.GLIP_INITIALIZE_QUERY:
             cat_ori_img_resolution = torch.cat((ori_img_resolution, ori_img_resolution), dim = -1).unsqueeze(1) # Left shape: (B, 1, 4)
             glip_results_relative_bbox = glip_results['bbox'] / cat_ori_img_resolution  # Left shape: (B, num_box, 4)
-            reference_points = glip_results_relative_bbox.reshape(B, -1, 2, 2).mean(dim = 2)    # Left shape: (B, num_box, 2). The predicted centers of GLIP.
+            reference_points = glip_results_relative_bbox.reshape(B, -1, 2, 2).mean(dim = 2)
             glip_center_emb = self.glip_center_emb_mlp(pos2posemb(reference_points))
             glip_box_emb = self.glip_box_emb_mlp(torch.cat((pos2posemb(glip_results_relative_bbox[:, :, :2]), pos2posemb(glip_results_relative_bbox[:, :, 2:])), dim = -1))
             glip_cls_emb = self.glip_cls_emb_mlp(glip_results['cls_emb'])  # Left shape: (B, num_box, L)
@@ -495,13 +496,17 @@ class PETR_HEAD(nn.Module):
         else:
             glip_visual_feat, glip_visual_pos_embed, glip_text_feat = None, None, None
         
-        outs_dec, _ = self.transformer(feat, masks, query_embeds, pos_embed, self.reg_branches, batched_inputs, \
-            glip_visual_feat = glip_visual_feat, glip_visual_pos_embed = glip_visual_pos_embed, glip_text_feat = glip_text_feat) # Left shape: (num_layers, bs, num_query, dim)
+        tgt = self.query_embed.weight.expand(B, -1, -1) # Left shape: (B, num_query, L)
+        query_embeds = torch.cat((query_embeds, tgt), dim = -1)    # Left shape: (B, num_query, 2 * L)
+        
+        outs_dec, init_reference, inter_references, _, _ = self.transformer(srcs = feat_list, masks = mask_list, pos_embeds = pos_emb_list, query_embed = query_embeds, reg_branches = self.reg_branches, reference_points = reference_points, \
+            reg_key_manager = self.reg_key_manager, glip_visual_feat = glip_visual_feat, glip_visual_pos_embed = glip_visual_pos_embed, glip_text_feat = glip_text_feat)
         outs_dec = torch.nan_to_num(outs_dec)
 
         outputs_classes = []
         outputs_regs = []
         for lvl in range(outs_dec.shape[0]):
+
             dec_cls_emb = self.cls_branches[lvl](outs_dec[lvl]) # Left shape: (B, num_query, emb_len) or (B, num_query, cls_num)
             dec_reg_result = self.reg_branches[lvl](outs_dec[lvl])  # Left shape: (B, num_query, reg_total_len)
             
@@ -514,7 +519,13 @@ class PETR_HEAD(nn.Module):
             else:
                 dot_product_logit = dec_cls_emb.clone() # Left shape: (B, num_query, cls_num)
 
-            reference = inverse_sigmoid(reference_points.clone())
+            if lvl == 0:
+                reference = init_reference
+            else:
+                reference = inter_references[lvl - 1]
+
+            reference = inverse_sigmoid(reference.clone())
+
             dec_reg_result[..., self.reg_key_manager('loc')][..., :2] += reference[..., 0:2]
             dec_reg_result[..., self.reg_key_manager('loc')][..., :2] = dec_reg_result[..., self.reg_key_manager('loc')][..., :2].sigmoid()
             dec_reg_result[..., self.reg_key_manager('loc')][..., 2:3] = dec_reg_result[..., self.reg_key_manager('loc')][..., 2:3].sigmoid() * self.max_depth

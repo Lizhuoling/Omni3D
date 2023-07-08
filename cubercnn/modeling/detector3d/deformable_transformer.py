@@ -1,6 +1,7 @@
 import copy
 from typing import Optional, List
 import math
+import pdb
 
 import torch
 import torch.nn.functional as F
@@ -8,24 +9,24 @@ from torch import nn, Tensor
 from torch.nn.init import xavier_uniform_, constant_, uniform_, normal_
 
 from mmdet.models.utils.transformer import inverse_sigmoid 
-from .ops.modules import MSDeformAttn
+from cubercnn.deformable_ops.modules import MSDeformAttn
 
 def build_deformable_transformer(**kwargs):
     return DeformableTransformer(
-        d_model=args.hidden_dim,
-        nhead=args.nheads,
-        num_encoder_layers=args.enc_layers,
-        num_decoder_layers=args.dec_layers,
-        dim_feedforward=args.dim_feedforward,
-        dropout=args.dropout,
+        d_model=kwargs['d_model'],
+        nhead=kwargs['nhead'],
+        num_encoder_layers=kwargs['num_encoder_layers'],
+        num_decoder_layers=kwargs['num_decoder_layers'],
+        dim_feedforward=kwargs['dim_feedforward'],
+        dropout=kwargs['dropout'],
         activation="relu",
         return_intermediate_dec=True,
-        num_feature_levels=args.num_feature_levels,
-        dec_n_points=args.dec_n_points,
-        enc_n_points=args.enc_n_points,
-        two_stage=args.two_stage,
-        two_stage_num_proposals=args.num_queries,
-        use_dab=True)
+        num_feature_levels=kwargs['num_feature_levels'],
+        dec_n_points=kwargs['dec_n_points'],
+        enc_n_points=kwargs['enc_n_points'],
+        two_stage=kwargs['two_stage'],
+        two_stage_num_proposals=kwargs['two_stage_num_proposals'],
+        use_dab=kwargs['use_dab'])
 
 class DeformableTransformer(nn.Module):
     def __init__(self, d_model=256, nhead=8,
@@ -60,9 +61,6 @@ class DeformableTransformer(nn.Module):
             self.enc_output_norm = nn.LayerNorm(d_model)
             self.pos_trans = nn.Linear(d_model * 2, d_model * 2)
             self.pos_trans_norm = nn.LayerNorm(d_model * 2)
-        else:
-            if not self.use_dab:
-                self.reference_points = nn.Linear(d_model, 2)
 
         self.high_dim_query_update = high_dim_query_update
         if high_dim_query_update:
@@ -77,9 +75,7 @@ class DeformableTransformer(nn.Module):
         for m in self.modules():
             if isinstance(m, MSDeformAttn):
                 m._reset_parameters()
-        if not self.two_stage and not self.use_dab:
-            xavier_uniform_(self.reference_points.weight.data, gain=1.0)
-            constant_(self.reference_points.bias.data, 0.)
+
         normal_(self.level_embed)
 
     def get_proposal_pos_embed(self, proposals):
@@ -138,7 +134,8 @@ class DeformableTransformer(nn.Module):
         valid_ratio = torch.stack([valid_ratio_w, valid_ratio_h], -1)
         return valid_ratio
 
-    def forward(self, srcs, masks, pos_embeds, query_embed=None):
+    def forward(self, srcs, masks, pos_embeds, query_embed=None, reg_branches = None, reference_points = None, reg_key_manager = None, \
+        glip_visual_feat = None, glip_visual_pos_embed = None, glip_text_feat = None):
         """
         Input:
             - srcs: List([bs, c, h, w])
@@ -197,24 +194,21 @@ class DeformableTransformer(nn.Module):
             tgt = tgt.unsqueeze(0).expand(bs, -1, -1)
             init_reference_out = reference_points
         else:
-            query_embed, tgt = torch.split(query_embed, c, dim=1)
-            query_embed = query_embed.unsqueeze(0).expand(bs, -1, -1)
-            tgt = tgt.unsqueeze(0).expand(bs, -1, -1)
-            reference_points = self.reference_points(query_embed).sigmoid() 
-                # bs, num_quires, 2
-            init_reference_out = reference_points
+            query_embed, tgt = torch.split(query_embed, c, dim=2)   # query_embed shape: (bs, num_query, 2), tgt shape: (bs, num_query, 2)
+            init_reference_out = reference_points.clone()   # Left shape: (bs, num_query, 2)
 
         # decoder
-        # import ipdb; ipdb.set_trace()
         hs, inter_references = self.decoder(tgt, reference_points, memory,
                                             spatial_shapes, level_start_index, valid_ratios, 
                                             query_pos=query_embed if not self.use_dab else None, 
-                                            src_padding_mask=mask_flatten)
+                                            src_padding_mask=mask_flatten, reg_branches = reg_branches, reg_key_manager = reg_key_manager)
 
         inter_references_out = inter_references
+
         if self.two_stage:
             return hs, init_reference_out, inter_references_out, enc_outputs_class, enc_outputs_coord_unact
-        return hs, init_reference_out, inter_references_out, None, None
+        
+        return hs, init_reference_out, inter_references_out, None, None # hs shape: (num_dec, bs, num_query, L), inter_references_out shape: (num_dec, bs, num_query, 2)
 
 
 class DeformableTransformerEncoderLayer(nn.Module):
@@ -363,8 +357,6 @@ class DeformableTransformerDecoder(nn.Module):
         self.num_layers = num_layers
         self.return_intermediate = return_intermediate
         # hack implementation for iterative bounding box refinement and two-stage Deformable DETR
-        self.bbox_embed = None
-        self.class_embed = None
         self.use_dab = use_dab
         self.d_model = d_model
         self.no_sine_embed = no_sine_embed
@@ -381,26 +373,19 @@ class DeformableTransformerDecoder(nn.Module):
 
     def forward(self, tgt, reference_points, src, src_spatial_shapes,       
                 src_level_start_index, src_valid_ratios,
-                query_pos=None, src_padding_mask=None):
+                query_pos=None, src_padding_mask=None, reg_branches = None, reg_key_manager = None):
         output = tgt
         if self.use_dab:
             assert query_pos is None
         bs = src.shape[0]
-        reference_points = reference_points[None].repeat(bs, 1, 1) # bs, nq, 4(xywh)
-
-
+        
         intermediate = []
         intermediate_reference_points = []
         for lid, layer in enumerate(self.layers):
-            # import ipdb; ipdb.set_trace()
-            if reference_points.shape[-1] == 4:
-                reference_points_input = reference_points[:, :, None] \
-                                         * torch.cat([src_valid_ratios, src_valid_ratios], -1)[:, None] # bs, nq, 4, 4
-            else:
-                assert reference_points.shape[-1] == 2
-                reference_points_input = reference_points[:, :, None] * src_valid_ratios[:, None]
+            assert reference_points.shape[-1] == 2
+            reference_points_input = reference_points[:, :, None] * src_valid_ratios[:, None]   # Make sure the reference points are in the valid image regions.
+
             if self.use_dab:
-                # import ipdb; ipdb.set_trace()
                 if self.no_sine_embed:
                     raw_query_pos = self.ref_point_head(reference_points_input)
                 else:
@@ -408,25 +393,20 @@ class DeformableTransformerDecoder(nn.Module):
                     raw_query_pos = self.ref_point_head(query_sine_embed) # bs, nq, 256
                 pos_scale = self.query_scale(output) if lid != 0 else 1
                 query_pos = pos_scale * raw_query_pos
+
             if self.high_dim_query_update and lid != 0:
                 query_pos = query_pos + self.high_dim_query_proj(output)                 
 
-
             output = layer(output, query_pos, reference_points_input, src, src_spatial_shapes, src_level_start_index, src_padding_mask)
+            
+            if reg_branches is not None:
+                tmp = reg_branches[lid](output)[..., reg_key_manager('loc')][..., :2]   # Left shape: (B, num_query, 2)
 
-            # hack implementation for iterative bounding box refinement
-            if self.bbox_embed is not None:
-                tmp = self.bbox_embed[lid](output)
-                if reference_points.shape[-1] == 4:
-                    new_reference_points = tmp + inverse_sigmoid(reference_points)
-                    new_reference_points = new_reference_points.sigmoid()
-                else:
-                    assert reference_points.shape[-1] == 2
-                    new_reference_points = tmp
-                    new_reference_points[..., :2] = tmp[..., :2] + inverse_sigmoid(reference_points)
-                    new_reference_points = new_reference_points.sigmoid()
+                new_reference_points = tmp
+                new_reference_points[..., :2] = tmp[..., :2] + inverse_sigmoid(reference_points)
+                new_reference_points = new_reference_points.sigmoid()
                 reference_points = new_reference_points.detach()
-
+                
             if self.return_intermediate:
                 intermediate.append(output)
                 intermediate_reference_points.append(reference_points)
