@@ -331,6 +331,30 @@ class DeformableTransformerDecoderLayer(nn.Module):
         return tgt
 
     def forward(self, tgt, query_pos, reference_points, src, src_spatial_shapes, level_start_index, src_padding_mask=None):
+        if self.training:
+            x = torch.utils.checkpoint.checkpoint(
+                self._forward, 
+                tgt, 
+                query_pos, 
+                reference_points, 
+                src, 
+                src_spatial_shapes, 
+                level_start_index, 
+                src_padding_mask,
+            )
+        else:
+            x = self._forward(
+                tgt, 
+                query_pos, 
+                reference_points, 
+                src, 
+                src_spatial_shapes, 
+                level_start_index, 
+                src_padding_mask,
+            )
+        return x
+
+    def _forward(self, tgt, query_pos, reference_points, src, src_spatial_shapes, level_start_index, src_padding_mask=None):
         # self attention
         q = k = self.with_pos_embed(tgt, query_pos)
         tgt2 = self.self_attn(q.transpose(0, 1), k.transpose(0, 1), tgt.transpose(0, 1))[0].transpose(0, 1)

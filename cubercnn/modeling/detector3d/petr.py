@@ -54,7 +54,7 @@ class DETECTOR_PETR(nn.Module):
         self.img_backbone.init_weights()
 
         if cfg.MODEL.DETECTOR3D.PETR.USE_NECK:
-            neck_cfg = neck_cfgs(cfg.MODEL.DETECTOR3D.PETR.NECK_NAME)
+            neck_cfg = neck_cfgs(cfg.MODEL.DETECTOR3D.PETR.NECK_NAME, cfg)
             self.img_neck = build_neck(neck_cfg)
             petr_head_inchannel = neck_cfg['out_channels']
         else:
@@ -71,7 +71,7 @@ class DETECTOR_PETR(nn.Module):
         
         if self.cfg.MODEL.DETECTOR3D.PETR.USE_NECK:
             feat_list = self.img_neck(backbone_feat_list)
-
+        
         return list(feat_list)
 
     def forward(self, images, batched_inputs, glip_results, class_name_emb, glip_text_emb, glip_visual_emb, ori_img_resolution):
@@ -172,7 +172,7 @@ def backbone_cfgs(backbone_name, cfg):
 
     return cfgs[backbone_name]
 
-def neck_cfgs(neck_name):
+def neck_cfgs(neck_name, cfg):
     cfgs = dict(
         CPFPN_Res50 = dict(
             type='CPFPN',
@@ -184,7 +184,7 @@ def neck_cfgs(neck_name):
             type='CPFPN',
             in_channels=[512, 768, 1024],
             out_channels=256,
-            num_outs=4,
+            num_outs=cfg.MODEL.DETECTOR3D.PETR.FEAT_LEVEL_NUM,
         ),
     )
 
@@ -232,13 +232,13 @@ def transformer_cfgs(transformer_name, cfg):
         DEFORMABLE_TRANSFORMER = dict(
             d_model = 256,
             nhead = 8,
-            num_encoder_layers = 0,
-            num_decoder_layers = 6,
-            dim_feedforward = 2048,
+            num_encoder_layers = cfg.MODEL.DETECTOR3D.PETR.ENC_NUM,
+            num_decoder_layers = cfg.MODEL.DETECTOR3D.PETR.DEC_NUM,
+            dim_feedforward = 512,
             dropout = 0.0,
             activation = "relu",
             return_intermediate_dec=True,
-            num_feature_levels=4,
+            num_feature_levels=cfg.MODEL.DETECTOR3D.PETR.FEAT_LEVEL_NUM,
             dec_n_points=4,
             enc_n_points=4,
             two_stage=False,

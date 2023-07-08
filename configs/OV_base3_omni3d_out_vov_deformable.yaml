@@ -8,8 +8,8 @@ DATASETS:
   CATEGORY_NAMES: ('cyclist', 'pedestrian', 'trailer', 'bus', 'motorcycle', 'car', 'barrier', 'truck', 'van', 'traffic cone', 'bicycle')
 
 INPUT:
-  MIN_SIZE_TRAIN: (512,)
-  MIN_SIZE_TEST: 512
+  MIN_SIZE_TRAIN: (256,)
+  MIN_SIZE_TEST: 256
   RANDOM_FLIP: "none"
   COLOR_AUG: True
 
@@ -48,8 +48,12 @@ MODEL:
       BACKBONE_FP16: True
       USE_NECK: True
       NECK_NAME: 'CPFPN_VoV'
+      FEAT_LEVEL_NUM: 4
+
       TRANSFORMER_NAME: 'DEFORMABLE_TRANSFORMER'
-      FLASH_ATTN: True
+      ENC_NUM: 0
+      DEC_NUM: 6
+
       MATCHER_NAME: 'HungarianAssigner3D'
       DEPTH_LID: True
       NUM_QUERY: 200
