@@ -45,5 +45,6 @@ python setup_maskrcnn_benchmark.py develop
 
 pip install setuptools==59.5.0
 
-git clone https://github.com/facebookresearch/xformers.git
-cd xformers
+cd cubercnn/deformable_ops
+python setup.py build install
+cd ../..

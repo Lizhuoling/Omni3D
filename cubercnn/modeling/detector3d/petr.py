@@ -29,7 +29,7 @@ from cubercnn.util.util import Converter_key2channel
 from cubercnn.util import torch_dist
 from cubercnn import util as cubercnn_util
 from cubercnn.modeling.detector3d.detr_transformer import build_detr_transformer
-#from cubercnn.modeling.detector3d.deformable_transformer import build_deformable_transformer
+from cubercnn.modeling.detector3d.deformable_transformer import build_deformable_transformer
 from cubercnn.util.util import box_cxcywh_to_xyxy, generalized_box_iou 
 from cubercnn.util.position_encoding import SinePositionalEncoding
 from cubercnn.util.math_util import get_cuboid_verts
