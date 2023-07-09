@@ -2,6 +2,7 @@
 import json
 import pickle
 import cv2
+import pdb
 from time import time
 import numpy as np
 import os 
@@ -372,3 +373,29 @@ def box_xyxy_to_cxcywh(x):
     b = [(x0 + x1) / 2, (y0 + y1) / 2,
          (x1 - x0), (y1 - y0)]
     return torch.stack(b, dim=-1)
+
+def linear_clip_enc(points, img_shape):
+    assert points.ndim == 3 and points.shape[-1] == 2
+    assert img_shape.ndim == 2 and img_shape.shape[-1] == 2
+
+    points = points / img_shape.unsqueeze(1)
+
+    points_u = points[..., 0].clone()
+    points_v = points[..., 1].clone()
+    points[..., 0] = torch.clamp(points_u, min = 0, max = 0.9999)
+    points[..., 1] = torch.clamp(points_v, min = 0, max = 0.9999)
+
+    return points
+
+def linear_clip_dec(points, img_shape):
+    assert points.ndim == 3 and points.shape[-1] == 2
+    assert img_shape.ndim == 2 and img_shape.shape[-1] == 2
+
+    points = points * img_shape.unsqueeze(1)
+
+    points_u = points[..., 0].clone()
+    points_v = points[..., 1].clone()
+    points[..., 0] = torch.clamp(points_u, min = 0, max = img_shape[0, 0].item() - 1)
+    points[..., 1] = torch.clamp(points_v, min = 0, max = img_shape[0, 1].item() - 1)
+
+    return points

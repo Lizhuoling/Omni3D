@@ -10,6 +10,7 @@ from torch.nn.init import xavier_uniform_, constant_, uniform_, normal_
 
 from mmdet.models.utils.transformer import inverse_sigmoid 
 from cubercnn.deformable_ops.modules import MSDeformAttn
+from cubercnn.util.util import linear_clip_enc, linear_clip_dec
 
 def build_deformable_transformer(**kwargs):
     return DeformableTransformer(
@@ -26,7 +27,8 @@ def build_deformable_transformer(**kwargs):
         enc_n_points=kwargs['enc_n_points'],
         two_stage=kwargs['two_stage'],
         two_stage_num_proposals=kwargs['two_stage_num_proposals'],
-        use_dab=kwargs['use_dab'])
+        use_dab=kwargs['use_dab'],
+        cfg = kwargs['cfg'])
 
 class DeformableTransformer(nn.Module):
     def __init__(self, d_model=256, nhead=8,
@@ -34,9 +36,10 @@ class DeformableTransformer(nn.Module):
                  activation="relu", return_intermediate_dec=False,
                  num_feature_levels=4, dec_n_points=4,  enc_n_points=4,
                  two_stage=False, two_stage_num_proposals=300,
-                 use_dab=False, high_dim_query_update=False, no_sine_embed=False):
+                 use_dab=False, high_dim_query_update=False, no_sine_embed=False, cfg = None):
         super().__init__()
 
+        self.cfg = cfg
         self.d_model = d_model
         self.nhead = nhead
         self.two_stage = two_stage
@@ -46,13 +49,13 @@ class DeformableTransformer(nn.Module):
         encoder_layer = DeformableTransformerEncoderLayer(d_model, dim_feedforward,
                                                           dropout, activation,
                                                           num_feature_levels, nhead, enc_n_points)
-        self.encoder = DeformableTransformerEncoder(encoder_layer, num_encoder_layers)
+        self.encoder = DeformableTransformerEncoder(encoder_layer, num_encoder_layers, cfg = cfg)
 
         decoder_layer = DeformableTransformerDecoderLayer(d_model, dim_feedforward,
                                                           dropout, activation,
                                                           num_feature_levels, nhead, dec_n_points)
         self.decoder = DeformableTransformerDecoder(decoder_layer, num_decoder_layers, return_intermediate_dec, 
-                                                            use_dab=use_dab, d_model=d_model, high_dim_query_update=high_dim_query_update, no_sine_embed=no_sine_embed)
+                                                            use_dab=use_dab, d_model=d_model, high_dim_query_update=high_dim_query_update, no_sine_embed=no_sine_embed, cfg = cfg)
 
         self.level_embed = nn.Parameter(torch.Tensor(num_feature_levels, d_model))
 
@@ -134,7 +137,7 @@ class DeformableTransformer(nn.Module):
         valid_ratio = torch.stack([valid_ratio_w, valid_ratio_h], -1)
         return valid_ratio
 
-    def forward(self, srcs, masks, pos_embeds, query_embed=None, reg_branches = None, reference_points = None, reg_key_manager = None, \
+    def forward(self, srcs, masks, pos_embeds, query_embed=None, reg_branches = None, reference_points = None, reg_key_manager = None,  ori_img_resolution = None, \
         glip_visual_feat = None, glip_visual_pos_embed = None, glip_text_feat = None):
         """
         Input:
@@ -169,7 +172,6 @@ class DeformableTransformer(nn.Module):
 
         # encoder
         memory = self.encoder(src_flatten, spatial_shapes, level_start_index, valid_ratios, lvl_pos_embed_flatten, mask_flatten)
-        # import ipdb; ipdb.set_trace()
 
         # prepare input for decoder
         bs, _, c = memory.shape
@@ -201,7 +203,7 @@ class DeformableTransformer(nn.Module):
         hs, inter_references = self.decoder(tgt, reference_points, memory,
                                             spatial_shapes, level_start_index, valid_ratios, 
                                             query_pos=query_embed if not self.use_dab else None, 
-                                            src_padding_mask=mask_flatten, reg_branches = reg_branches, reg_key_manager = reg_key_manager)
+                                            src_padding_mask=mask_flatten, reg_branches = reg_branches, reg_key_manager = reg_key_manager, ori_img_resolution = ori_img_resolution)
 
         inter_references_out = inter_references
 
@@ -254,10 +256,11 @@ class DeformableTransformerEncoderLayer(nn.Module):
 
 
 class DeformableTransformerEncoder(nn.Module):
-    def __init__(self, encoder_layer, num_layers):
+    def __init__(self, encoder_layer, num_layers, cfg = None):
         super().__init__()
         self.layers = _get_clones(encoder_layer, num_layers)
         self.num_layers = num_layers
+        self.cfg = cfg
 
     @staticmethod
     def get_reference_points(spatial_shapes, valid_ratios, device):
@@ -375,8 +378,9 @@ class DeformableTransformerDecoderLayer(nn.Module):
 
 
 class DeformableTransformerDecoder(nn.Module):
-    def __init__(self, decoder_layer, num_layers, return_intermediate=False, use_dab=False, d_model=256, high_dim_query_update=False, no_sine_embed=False):
+    def __init__(self, decoder_layer, num_layers, return_intermediate=False, use_dab=False, d_model=256, high_dim_query_update=False, no_sine_embed=False, cfg = None):
         super().__init__()
+        self.cfg = cfg
         self.layers = _get_clones(decoder_layer, num_layers)
         self.num_layers = num_layers
         self.return_intermediate = return_intermediate
@@ -397,7 +401,7 @@ class DeformableTransformerDecoder(nn.Module):
 
     def forward(self, tgt, reference_points, src, src_spatial_shapes,       
                 src_level_start_index, src_valid_ratios,
-                query_pos=None, src_padding_mask=None, reg_branches = None, reg_key_manager = None):
+                query_pos=None, src_padding_mask=None, reg_branches = None, reg_key_manager = None, ori_img_resolution = None):
         output = tgt
         if self.use_dab:
             assert query_pos is None
@@ -427,8 +431,12 @@ class DeformableTransformerDecoder(nn.Module):
                 tmp = reg_branches[lid](output)[..., reg_key_manager('loc')][..., :2]   # Left shape: (B, num_query, 2)
 
                 new_reference_points = tmp
-                new_reference_points[..., :2] = tmp[..., :2] + inverse_sigmoid(reference_points)
-                new_reference_points = new_reference_points.sigmoid()
+                if self.cfg.MODEL.DETECTOR3D.PETR.CLIP_LINEAR_NORM:
+                    new_reference_points[..., :2] = tmp[..., :2] + linear_clip_dec(reference_points, ori_img_resolution)
+                    new_reference_points = linear_clip_enc(new_reference_points, ori_img_resolution)
+                else:
+                    new_reference_points[..., :2] = tmp[..., :2] + inverse_sigmoid(reference_points)
+                    new_reference_points = new_reference_points.sigmoid()
                 reference_points = new_reference_points.detach()
                 
             if self.return_intermediate:

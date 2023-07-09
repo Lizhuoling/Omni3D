@@ -25,7 +25,7 @@ from mmdet.models import build_loss
 
 from cubercnn.util.grid_mask import GridMask
 from cubercnn.modeling import neck
-from cubercnn.util.util import Converter_key2channel
+from cubercnn.util.util import Converter_key2channel, linear_clip_enc, linear_clip_dec
 from cubercnn.util import torch_dist
 from cubercnn import util as cubercnn_util
 from cubercnn.modeling.detector3d.detr_transformer import build_detr_transformer
@@ -235,7 +235,7 @@ def transformer_cfgs(transformer_name, cfg):
             num_encoder_layers = cfg.MODEL.DETECTOR3D.PETR.ENC_NUM,
             num_decoder_layers = cfg.MODEL.DETECTOR3D.PETR.DEC_NUM,
             dim_feedforward = 512,
-            dropout = 0.0,
+            dropout = 0.1,
             activation = "relu",
             return_intermediate_dec=True,
             num_feature_levels=cfg.MODEL.DETECTOR3D.PETR.FEAT_LEVEL_NUM,
@@ -244,6 +244,7 @@ def transformer_cfgs(transformer_name, cfg):
             two_stage=False,
             two_stage_num_proposals=cfg.MODEL.DETECTOR3D.PETR.NUM_QUERY,
             use_dab=False,
+            cfg = cfg,
         ),
     )
 
@@ -382,10 +383,6 @@ class PETR_HEAD(nn.Module):
                             ))
         self.matcher = build_assigner(matcher_cfg)
 
-        # Loss functions
-        #self.cls_loss = nn.BCEWithLogitsLoss(reduction = 'none')
-        #self.cls_loss = build_loss({'type': 'FocalLoss', 'use_sigmoid': True, 'gamma': 2.0, 'alpha': 0.25, 'loss_weight': 1.0})
-        #self.reg_loss = build_loss({'type': 'L1Loss', 'loss_weight': 1.0})
         self.reg_loss = nn.L1Loss(reduction = 'none')
         self.iou_loss = build_loss({'type': 'GIoULoss', 'loss_weight': 0.0})
         
@@ -455,7 +452,6 @@ class PETR_HEAD(nn.Module):
             pos_embed = self.pos_2d_projs[lvl](pos_embed)  # Left shape: (B, C, H, W)
             pos_emb_list.append(pos_embed)
 
-        assert self.cfg.MODEL.GLIP_MODEL.GLIP_INITIALIZE_QUERY == False, "The reference point precision problem caused by sigmoid has not been addressed!"
         if self.cfg.MODEL.GLIP_MODEL.GLIP_INITIALIZE_QUERY:
             cat_ori_img_resolution = torch.cat((ori_img_resolution, ori_img_resolution), dim = -1).unsqueeze(1) # Left shape: (B, 1, 4)
             glip_results_relative_bbox = glip_results['bbox'] / cat_ori_img_resolution  # Left shape: (B, num_box, 4)
@@ -500,7 +496,7 @@ class PETR_HEAD(nn.Module):
         query_embeds = torch.cat((query_embeds, tgt), dim = -1)    # Left shape: (B, num_query, 2 * L)
         
         outs_dec, init_reference, inter_references, _, _ = self.transformer(srcs = feat_list, masks = mask_list, pos_embeds = pos_emb_list, query_embed = query_embeds, reg_branches = self.reg_branches, reference_points = reference_points, \
-            reg_key_manager = self.reg_key_manager, glip_visual_feat = glip_visual_feat, glip_visual_pos_embed = glip_visual_pos_embed, glip_text_feat = glip_text_feat)
+            reg_key_manager = self.reg_key_manager, ori_img_resolution = ori_img_resolution, glip_visual_feat = glip_visual_feat, glip_visual_pos_embed = glip_visual_pos_embed, glip_text_feat = glip_text_feat)
         outs_dec = torch.nan_to_num(outs_dec)
 
         outputs_classes = []
@@ -524,12 +520,15 @@ class PETR_HEAD(nn.Module):
             else:
                 reference = inter_references[lvl - 1]
 
-            reference = inverse_sigmoid(reference.clone())
-
-            dec_reg_result[..., self.reg_key_manager('loc')][..., :2] += reference[..., 0:2]
-            dec_reg_result[..., self.reg_key_manager('loc')][..., :2] = dec_reg_result[..., self.reg_key_manager('loc')][..., :2].sigmoid()
+            if self.cfg.MODEL.DETECTOR3D.PETR.CLIP_LINEAR_NORM:
+                reference = linear_clip_dec(reference.clone(), ori_img_resolution)
+                dec_reg_result[..., self.reg_key_manager('loc')][..., :2] += reference[..., 0:2]
+                dec_reg_result[..., self.reg_key_manager('loc')][..., :2] = linear_clip_enc(dec_reg_result[..., self.reg_key_manager('loc')][..., :2], ori_img_resolution)
+            else:
+                reference = inverse_sigmoid(reference.clone())
+                dec_reg_result[..., self.reg_key_manager('loc')][..., :2] += reference[..., 0:2]
+                dec_reg_result[..., self.reg_key_manager('loc')][..., :2] = dec_reg_result[..., self.reg_key_manager('loc')][..., :2].sigmoid()
             dec_reg_result[..., self.reg_key_manager('loc')][..., 2:3] = dec_reg_result[..., self.reg_key_manager('loc')][..., 2:3].sigmoid() * self.max_depth
-
 
             outputs_classes.append(dot_product_logit)  # Left shape: (B, num_query, cls_num)
             outputs_regs.append(dec_reg_result)
@@ -559,9 +558,10 @@ class PETR_HEAD(nn.Module):
         B = cls_scores.shape[0]
         
         max_cls_scores, max_cls_idxs = cls_scores.max(-1) # max_cls_scores shape: (B, num_query), max_cls_idxs shape: (B, num_query)
-        confs_3d_base_2d = torch.clamp(1 - bbox_preds[...,  self.reg_key_manager('uncern')].exp().squeeze(-1) / 10, min = 1e-3, max = 1)   # Left shape: (B, num_query)
+        confs_3d_base_2d = torch.clamp(1 - bbox_preds[...,  self.reg_key_manager('uncern')].exp().squeeze(-1) / 300, min = 1e-3, max = 1)   # Left shape: (B, num_query)
         confs_3d = max_cls_scores * confs_3d_base_2d
         inference_results = []
+        
         for bs in range(B):
             bs_instance = Instances(image_size = (batched_inputs[bs]['height'], batched_inputs[bs]['width']))
         
@@ -588,7 +588,7 @@ class PETR_HEAD(nn.Module):
             initial_w, initial_h = batched_inputs[bs]['width'], batched_inputs[bs]['height']
             bs_pred_uvd[:, :2] = bs_pred_uvd[:, :2] * torch.Tensor([initial_w, initial_h]).to(bs_pred_uvd.device).unsqueeze(0)  # Restore predicted (u, v) to the pixel coordinate system before augmentation.
             real_focal_length_y = Ks[1][1]
-            bs_pred_uvd[:, 2:3] = bs_pred_uvd[:, 2:3] * ori_img_resolution[bs][1] / initial_h * real_focal_length_y /self.cfg.MODEL.DETECTOR3D.PETR.HEAD.VIRTUAL_DEPTH
+            bs_pred_uvd[:, 2:3] = bs_pred_uvd[:, 2:3] * ori_img_resolution[bs][1] / initial_h * real_focal_length_y / self.cfg.MODEL.DETECTOR3D.PETR.HEAD.VIRTUAL_FOCAL_Y
             bs_pred_xyz = (Ks.inverse()[None] @ torch.cat((bs_pred_uvd[:, :2] * bs_pred_uvd[:, 2:3], bs_pred_uvd[:, 2:3]), dim = -1).unsqueeze(-1)).squeeze(-1)   # Left shape: (valid_query_num, 3)
             bs_pred_dims = bs_bbox_preds[..., self.reg_key_manager('dim')].exp()  # Left shape: (valid_query_num, 3)
             bs_pred_pose = bs_bbox_preds[..., self.reg_key_manager('pose')]   # Left shape: (valid_query_num, 6)
@@ -609,7 +609,7 @@ class PETR_HEAD(nn.Module):
                 corners_2d, corners_3d = get_cuboid_verts(K = Ks, box3d = torch.cat((bs_pred_xyz, bs_pred_dims), dim = 1), R = bs_pred_pose)
                 corners_2d = corners_2d[:, :, :2]
                 bs_pred_2ddet = torch.cat((corners_2d.min(dim = 1)[0], corners_2d.max(dim = 1)[0]), dim = -1)   # Left shape: (valid_query_num, 4). Predicted 2D box in the original image resolution.
-
+                
                 # For debug
                 '''from cubercnn.vis.vis import draw_3d_box
                 img = batched_inputs[0]['image'].permute(1, 2, 0).numpy()
@@ -619,14 +619,15 @@ class PETR_HEAD(nn.Module):
                 initial_reso = torch.Tensor([initial_w, initial_h, initial_w, initial_h]).to(img_reso.device)
                 Ks[0, :] = Ks[0, :] * ori_img_resolution[bs][0] / initial_w
                 Ks[1, :] = Ks[1, :] * ori_img_resolution[bs][1] / initial_h
-                corners_2d, corners_3d = get_cuboid_verts(K = Ks, box3d = torch.cat((bs_pred_3D_center, bs_pred_dims), dim = 1), R = bs_pred_pose)
+                corners_2d, corners_3d = get_cuboid_verts(K = Ks, box3d = torch.cat((bs_pred_xyz, bs_pred_dims), dim = 1), R = bs_pred_pose)
                 corners_2d = corners_2d[:, :, :2].detach()
                 box2d = torch.cat((corners_2d.min(dim = 1)[0], corners_2d.max(dim = 1)[0]), dim = -1)
+                
                 for box in box2d:
                     box = box.detach().cpu().numpy().astype(np.int32)
                     cv2.rectangle(img, (box[0], box[1]), (box[2], box[3]), (0, 0, 255), 2)
-                for idx in range(bs_pred_3D_center.shape[0]):
-                    draw_3d_box(img, Ks.cpu().numpy(), torch.cat((bs_pred_3D_center[idx].detach().cpu(), bs_pred_dims[idx].detach().cpu()), dim = 0).numpy(), bs_pred_pose[idx].detach().cpu().numpy())
+                for idx in range(bs_pred_xyz.shape[0]):
+                    draw_3d_box(img, Ks.cpu().numpy(), torch.cat((bs_pred_xyz[idx].detach().cpu(), bs_pred_dims[idx].detach().cpu()), dim = 0).numpy(), bs_pred_pose[idx].detach().cpu().numpy())
                 cv2.imwrite('vis.png', img)
                 pdb.set_trace()'''
 
