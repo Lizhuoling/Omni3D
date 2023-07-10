@@ -13,6 +13,7 @@ import torchvision
 from pytorch3d.transforms import rotation_6d_to_matrix
 from pytorch3d.transforms.so3 import so3_relative_angle
 from detectron2.structures import Instances, Boxes
+from mmcv.runner.base_module import BaseModule
 
 from mmcv.runner import force_fp32, auto_fp16
 from mmcv.cnn import Conv2d, Linear, build_activation_layer, bias_init_with_prob
@@ -34,7 +35,7 @@ from cubercnn.util.util import box_cxcywh_to_xyxy, generalized_box_iou
 from cubercnn.util.position_encoding import SinePositionalEncoding
 from cubercnn.util.math_util import get_cuboid_verts
 
-class DETECTOR_PETR(nn.Module):
+class DETECTOR_PETR(BaseModule):
     def __init__(self, cfg):
         super().__init__()
         self.cfg = cfg
@@ -165,7 +166,7 @@ def backbone_cfgs(backbone_name, cfg):
             norm_eval=cfg.MODEL.DETECTOR3D.PETR.BACKBONE_NORM_EVAL,
             frozen_stages=-1,
             input_ch=3,
-            out_features=('stage3', 'stage4','stage5',),
+            out_features=('stage4','stage5',),
             pretrained = 'MODEL/fcos3d_vovnet_imgbackbone_omni3d.pth',
         ),
     )
@@ -182,9 +183,9 @@ def neck_cfgs(neck_name, cfg):
         ),
         CPFPN_VoV = dict(
             type='CPFPN',
-            in_channels=[512, 768, 1024],
+            in_channels=[768, 1024],
             out_channels=256,
-            num_outs=cfg.MODEL.DETECTOR3D.PETR.FEAT_LEVEL_NUM,
+            num_outs=2,
         ),
     )
 
@@ -238,7 +239,7 @@ def transformer_cfgs(transformer_name, cfg):
             dropout = 0.1,
             activation = "relu",
             return_intermediate_dec=True,
-            num_feature_levels=cfg.MODEL.DETECTOR3D.PETR.FEAT_LEVEL_NUM,
+            num_feature_levels=len(cfg.MODEL.DETECTOR3D.PETR.FEAT_LEVEL_IDXS),
             dec_n_points=4,
             enc_n_points=4,
             two_stage=False,
@@ -420,12 +421,15 @@ class PETR_HEAD(nn.Module):
             nn.init.uniform_(self.reference_points.weight.data, 0, 1)
             self.reference_points.weight.requires_grad = False
 
-    def forward(self, feat_list, glip_results, class_name_emb, Ks, scale_ratios, masks, batched_inputs, pad_img_resolution, ori_img_resolution, glip_text_emb, glip_visual_emb):
+    def forward(self, feats, glip_results, class_name_emb, Ks, scale_ratios, masks, batched_inputs, pad_img_resolution, ori_img_resolution, glip_text_emb, glip_visual_emb):
         '''
         Description:
             pad_img_resolution: For the input image batch after augmentation, the resolution of the whole batch image tensor.
             ori_img_resolution: In the input image after augmentation, the resolution of valid regions (width first height next).
         '''
+        feat_list = []
+        for idx in self.cfg.MODEL.DETECTOR3D.PETR.FEAT_LEVEL_IDXS:
+            feat_list.append(feats[idx])
         B = feat_list[0].shape[0]
         
         # Prepare the class name embedding following the operations in GLIP.
@@ -558,7 +562,7 @@ class PETR_HEAD(nn.Module):
         B = cls_scores.shape[0]
         
         max_cls_scores, max_cls_idxs = cls_scores.max(-1) # max_cls_scores shape: (B, num_query), max_cls_idxs shape: (B, num_query)
-        confs_3d_base_2d = torch.clamp(1 - bbox_preds[...,  self.reg_key_manager('uncern')].exp().squeeze(-1) / 300, min = 1e-3, max = 1)   # Left shape: (B, num_query)
+        confs_3d_base_2d = torch.clamp(1 - bbox_preds[...,  self.reg_key_manager('uncern')].exp().squeeze(-1) / 10, min = 1e-3, max = 1)   # Left shape: (B, num_query)
         confs_3d = max_cls_scores * confs_3d_base_2d
         inference_results = []
         
@@ -716,6 +720,7 @@ class PETR_HEAD(nn.Module):
              
             # Transform (u, v, d) to (x, y, z)
             bs_loc_xyz_preds = bs_loc_preds.clone() # Left shape: (num_gt, 3)
+            bs_loc_xyz_preds[:, :2] = bs_loc_xyz_preds[:, :2] * ori_img_resolution[bs].unsqueeze(0)
             bs_loc_xyz_preds = torch.cat((bs_loc_xyz_preds[:, :2] * bs_loc_xyz_preds[:, 2:3], bs_loc_xyz_preds[:, 2:3]), dim = 1)
             bs_loc_xyz_preds = (Ks_list[bs].inverse().unsqueeze(0) @ bs_loc_xyz_preds.unsqueeze(-1)).squeeze(-1)    # Left shape: (num_gt, 3)
 

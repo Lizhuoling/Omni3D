@@ -54,6 +54,7 @@ MODEL:
       TRANSFORMER_NAME: 'DEFORMABLE_TRANSFORMER'
       ENC_NUM: 0
       DEC_NUM: 6
+      CLIP_LINEAR_NORM: True
 
       MATCHER_NAME: 'HungarianAssigner3D'
       DEPTH_LID: True

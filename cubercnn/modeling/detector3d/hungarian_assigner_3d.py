@@ -120,6 +120,7 @@ class HungarianAssigner3D(BaseAssigner):
         loc_d_preds = clone_loc_preds[:, 2:3].unsqueeze(1).expand(-1, num_gts, -1) # Left shape: (num_query, num_gt, 1)
         loc_uv_gts = uv_gts[None].expand(num_preds, -1, -1) # Left shape: (num_query, num_gt, 2)
         loc_d_gts = depth_gts[None].expand(num_preds, -1, -1) # Left shape: (num_query, num_gt, 1)
+        loc_xyz_preds[:, :2] = loc_xyz_preds[:, :2] * ori_img_resolution
         loc_xyz_preds[:, :2] = loc_xyz_preds[:, :2] * loc_xyz_preds[:, 2:]  # Left shape: (num_query, 3)
         loc_xyz_preds = (Ks.inverse().unsqueeze(0) @ loc_xyz_preds.unsqueeze(-1)).squeeze(-1)   # Left shape: (num_query, 3)
         loc_xyz_preds = loc_xyz_preds.unsqueeze(1).expand(-1, num_gts, -1)  # Left shape: (num_query, num_gt, 3)

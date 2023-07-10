@@ -5,5 +5,5 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python tools/train_net.py \
   --num-gpus 4 \
   --dist-url tcp://127.0.0.1:12345 \
   OUTPUT_DIR output/$exp_id \
-  #MODEL.WEIGHTS_PRETRAIN output/OV_base3_omni3d_out_vov_deformable/model_recent.pth
+  #MODEL.WEIGHTS_PRETRAIN output/OV_base3_omni3d_out_vov_deformable/model_recent.pth \
   #--resume \
