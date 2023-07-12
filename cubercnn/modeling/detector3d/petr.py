@@ -166,7 +166,7 @@ def backbone_cfgs(backbone_name, cfg):
             norm_eval=cfg.MODEL.DETECTOR3D.PETR.BACKBONE_NORM_EVAL,
             frozen_stages=-1,
             input_ch=3,
-            out_features=('stage4','stage5',),
+            out_features=('stage3', 'stage4','stage5',),
             pretrained = 'MODEL/fcos3d_vovnet_imgbackbone_omni3d.pth',
         ),
     )
@@ -179,13 +179,13 @@ def neck_cfgs(neck_name, cfg):
             type='CPFPN',
             in_channels=[1024, 2048],
             out_channels=256,
-            num_outs=2,
+            num_outs=4,
         ),
         CPFPN_VoV = dict(
             type='CPFPN',
-            in_channels=[768, 1024],
+            in_channels=[512, 768, 1024],
             out_channels=256,
-            num_outs=2,
+            num_outs=3,
         ),
     )
 
@@ -452,7 +452,7 @@ class PETR_HEAD(nn.Module):
         # Produce position embedding
         pos_emb_list = []
         for lvl, feat in enumerate(feat_list):
-            pos_embed = self.pos_2d_generator(masks) # Left shape: (B, C, H, W)
+            pos_embed = self.pos_2d_generator(mask_list[lvl]) # Left shape: (B, C, H, W)
             pos_embed = self.pos_2d_projs[lvl](pos_embed)  # Left shape: (B, C, H, W)
             pos_emb_list.append(pos_embed)
 

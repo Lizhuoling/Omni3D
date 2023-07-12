@@ -118,9 +118,9 @@ class DeformableTransformer(nn.Module):
             spatial_shape = (h, w)
             spatial_shapes.append(spatial_shape)
 
-            src = src.flatten(2).transpose(1, 2)                # bs, hw, c
+            src = src.flatten(2).transpose(1, 2).contiguous()                # bs, hw, c
             mask = mask.flatten(1)                              # bs, hw
-            pos_embed = pos_embed.flatten(2).transpose(1, 2)    # bs, hw, c
+            pos_embed = pos_embed.flatten(2).transpose(1, 2).contiguous()    # bs, hw, c
             lvl_pos_embed = pos_embed + self.level_embed[lvl].view(1, 1, -1)
             lvl_pos_embed_flatten.append(lvl_pos_embed)
             src_flatten.append(src)
@@ -131,10 +131,10 @@ class DeformableTransformer(nn.Module):
         spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=src_flatten.device)
         level_start_index = torch.cat((spatial_shapes.new_zeros((1, )), spatial_shapes.prod(1).cumsum(0)[:-1]))
         valid_ratios = torch.stack([self.get_valid_ratio(m) for m in masks], 1)
-
+        
         # encoder
         memory = self.encoder(src_flatten, spatial_shapes, level_start_index, valid_ratios, lvl_pos_embed_flatten, mask_flatten)
-
+        
         # prepare input for decoder
         bs, _, c = memory.shape
         if self.use_dab:
@@ -224,7 +224,7 @@ class DeformableTransformerEncoder(nn.Module):
         reference_points = reference_points[:, :, None] * valid_ratios[:, None]
         return reference_points
 
-    def forward(self, src, spatial_shapes, level_start_index, valid_ratios, pos=None, padding_mask=None):
+    def _forward(self, src, spatial_shapes, level_start_index, valid_ratios, pos=None, padding_mask=None):
         """
         Input:
             - src: [bs, sum(hi*wi), 256]
@@ -244,6 +244,28 @@ class DeformableTransformerEncoder(nn.Module):
             output = layer(output, pos, reference_points, spatial_shapes, level_start_index, padding_mask)
 
         return output
+
+    def forward(self, src, spatial_shapes, level_start_index, valid_ratios, pos=None, padding_mask=None):
+        if self.training:
+            x = torch.utils.checkpoint.checkpoint(
+                self._forward, 
+                src, 
+                spatial_shapes, 
+                level_start_index, 
+                valid_ratios, 
+                pos, 
+                padding_mask,
+            )
+        else:
+            x = self._forward(
+                src, 
+                spatial_shapes, 
+                level_start_index, 
+                valid_ratios, 
+                pos, 
+                padding_mask,
+            )
+        return x
 
 
 class DeformableTransformerDecoderLayer(nn.Module):
@@ -307,7 +329,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
     def _forward(self, tgt, query_pos, reference_points, src, src_spatial_shapes, level_start_index, src_padding_mask=None):
         # self attention
         q = k = self.with_pos_embed(tgt, query_pos)
-        tgt2 = self.self_attn(q.transpose(0, 1), k.transpose(0, 1), tgt.transpose(0, 1))[0].transpose(0, 1)
+        tgt2 = self.self_attn(q.transpose(0, 1).contiguous(), k.transpose(0, 1).contiguous(), tgt.transpose(0, 1).contiguous())[0].transpose(0, 1).contiguous()
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
 
@@ -335,12 +357,7 @@ class DeformableTransformerDecoder(nn.Module):
         self.use_dab = use_dab
         self.d_model = d_model
         self.no_sine_embed = no_sine_embed
-        if use_dab:
-            self.query_scale = MLP(d_model, d_model, d_model, 2)
-            if self.no_sine_embed:
-                self.ref_point_head = MLP(4, d_model, d_model, 3)
-            else:
-                self.ref_point_head = MLP(2 * d_model, d_model, d_model, 2)
+
         self.high_dim_query_update = high_dim_query_update
         if high_dim_query_update:
             self.high_dim_query_proj = MLP(d_model, d_model, d_model, 2)
@@ -359,15 +376,6 @@ class DeformableTransformerDecoder(nn.Module):
         for lid, layer in enumerate(self.layers):
             assert reference_points.shape[-1] == 2
             reference_points_input = reference_points[:, :, None] * src_valid_ratios[:, None]   # Make sure the reference points are in the valid image regions.
-
-            if self.use_dab:
-                if self.no_sine_embed:
-                    raw_query_pos = self.ref_point_head(reference_points_input)
-                else:
-                    query_sine_embed = gen_sineembed_for_position(reference_points_input[:, :, 0, :]) # bs, nq, 256*2 
-                    raw_query_pos = self.ref_point_head(query_sine_embed) # bs, nq, 256
-                pos_scale = self.query_scale(output) if lid != 0 else 1
-                query_pos = pos_scale * raw_query_pos
 
             if self.high_dim_query_update and lid != 0:
                 query_pos = query_pos + self.high_dim_query_proj(output)                 

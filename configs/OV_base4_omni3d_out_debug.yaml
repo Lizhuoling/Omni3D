@@ -8,13 +8,14 @@ DATASETS:
   CATEGORY_NAMES: ('cyclist', 'pedestrian', 'trailer', 'bus', 'motorcycle', 'car', 'barrier', 'truck', 'van', 'traffic cone', 'bicycle')
 
 INPUT:
-  MIN_SIZE_TRAIN: (256,)
-  MIN_SIZE_TEST: 256
+  RESIZE_TGT_SIZE: (1024, 1280) # (1280, 1024)
+  #MIN_SIZE_TRAIN: (256,)
+  #MIN_SIZE_TEST: 256
   RANDOM_FLIP: "none"
   COLOR_AUG: True
 
 SOLVER:
-  IMS_PER_BATCH: 2
+  IMS_PER_BATCH: 8
   TYPE: "mmcv_AdamW"
   BASE_LR: 2e-4
   WEIGHT_DECAY: 1e-2
@@ -48,11 +49,12 @@ MODEL:
       BACKBONE_FP16: True
       USE_NECK: True
       NECK_NAME: 'CPFPN_VoV'
-      FEAT_LEVEL_IDXS: [0, 1,]
+      FEAT_LEVEL_IDXS: [0, 1, 2]
 
       TRANSFORMER_NAME: 'DEFORMABLE_TRANSFORMER'
-      ENC_NUM: 0
+      ENC_NUM: 6
       DEC_NUM: 6
+      CLIP_LINEAR_NORM: True
 
       MATCHER_NAME: 'HungarianAssigner3D'
       DEPTH_LID: True
@@ -69,7 +71,7 @@ MODEL:
         VIRTUAL_FOCAL_Y: 512.0
         UNCERN_RANGE: [-10, 10]
         CLS_WEIGHT: 2.0
-        LOC_WEIGHT: 0.1
+        LOC_WEIGHT: 0.0
         POSE_WEIGHT: 0.25
         DIM_WEIGHT: 0.25
         DEPTH_WEIGHT: 0.25
