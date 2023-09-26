@@ -1,4 +1,4 @@
-exp_id=TwoStage_baseline_omni3dtest
+exp_id=TwoStage_Baseline_crossdomain_hypersim
 
 #ulimit -n 65536
 
