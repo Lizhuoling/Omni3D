@@ -1,4 +1,4 @@
-exp_id=TwoStage_Baseline_crossdomain_hypersim
+exp_id=TwoStage_Baseline_crossdomain_sunrgbd
 
 #ulimit -n 65536
 
