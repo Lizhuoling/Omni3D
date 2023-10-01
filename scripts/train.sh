@@ -1,4 +1,4 @@
-exp_id=TwoStage_Baseline_crossdomain_sunrgbd
+exp_id=TwoStage_omni3d_quasibevformer
 
 #ulimit -n 65536
 
