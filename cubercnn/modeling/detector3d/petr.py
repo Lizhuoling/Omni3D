@@ -845,6 +845,7 @@ class PETR_HEAD(nn.Module):
 
             # For debug
             '''from cubercnn.vis.vis import draw_3d_box
+            pred_conf_thre = 0.2
             img = batched_inputs[0]['image'].permute(1, 2, 0).numpy()
             img = np.ascontiguousarray(img)
             img_reso = torch.cat((ori_img_resolution[bs], ori_img_resolution[bs]), dim = 0)
@@ -855,11 +856,16 @@ class PETR_HEAD(nn.Module):
             corners_2d, corners_3d = get_cuboid_verts(K = Ks, box3d = torch.cat((bs_pred_3D_center, bs_pred_dims), dim = 1), R = bs_pred_pose)
             corners_2d = corners_2d[:, :, :2].detach()
             box2d = torch.cat((corners_2d.min(dim = 1)[0], corners_2d.max(dim = 1)[0]), dim = -1)
+            valid_pred_flag = (bs_scores > pred_conf_thre)
+            valid_box2d = box2d[valid_pred_flag]
+            valid_pred_3D_center = bs_pred_3D_center[valid_pred_flag]
+            valid_pred_dims = bs_pred_dims[valid_pred_flag]
+            valid_pred_pose = bs_pred_pose[valid_pred_flag]
             for box in box2d:
                 box = box.detach().cpu().numpy().astype(np.int32)
                 cv2.rectangle(img, (box[0], box[1]), (box[2], box[3]), (0, 0, 255), 2)
-            for idx in range(bs_pred_3D_center.shape[0]):
-                draw_3d_box(img, Ks.cpu().numpy(), torch.cat((bs_pred_3D_center[idx].detach().cpu(), bs_pred_dims[idx].detach().cpu()), dim = 0).numpy(), bs_pred_pose[idx].detach().cpu().numpy())
+            for idx in range(valid_pred_3D_center.shape[0]):
+                draw_3d_box(img, Ks.cpu().numpy(), torch.cat((valid_pred_3D_center[idx].detach().cpu(), valid_pred_dims[idx].detach().cpu()), dim = 0).numpy(), valid_pred_pose[idx].detach().cpu().numpy())
             cv2.imwrite('vis.png', img)
             pdb.set_trace()'''
 
@@ -1011,40 +1017,40 @@ class PETR_HEAD(nn.Module):
             bs_pose_gts = bs_gt_instance.get('gt_poses').to(device)[gt_idxs] # Left shape: (num_gt, 3, 3)
 
             # For debug
-            '''from cubercnn.vis.vis import draw_3d_box
-            img = batched_inputs[bs]['image'].permute(1, 2, 0).numpy()
-            img = np.ascontiguousarray(img)
-            img_reso = torch.cat((ori_img_resolution[bs], ori_img_resolution[bs]), dim = 0)
-            initial_w, initial_h = batched_inputs[bs]['width'], batched_inputs[bs]['height']
-            initial_reso = torch.Tensor([initial_w, initial_h, initial_w, initial_h]).to(img_reso.device)
-            Ks = torch.Tensor(np.array(batched_inputs[bs]['K'])).cuda()
-            Ks[0, :] = Ks[0, :] * ori_img_resolution[bs][0] / initial_w
-            Ks[1, :] = Ks[1, :] * ori_img_resolution[bs][1] / initial_h
-            # draw predictions
-            #pred_corners_2d, pred_corners_3d = get_cuboid_verts(K = Ks, box3d = torch.cat((bs_loc_preds, bs_dim_preds.exp()), dim = 1), R = bs_pose_preds)
-            #pred_corners_2d = pred_corners_2d[:, :, :2].detach()
-            #pred_box2d = torch.cat((pred_corners_2d.min(dim = 1)[0], pred_corners_2d.max(dim = 1)[0]), dim = -1)
-            #for box in pred_box2d:
-            #    box = box.detach().cpu().numpy().astype(np.int32)
-            #    cv2.rectangle(img, (box[0], box[1]), (box[2], box[3]), (0, 255, 0), 2)
-            #for idx in range(bs_loc_preds.shape[0]):
-            #    draw_3d_box(img, Ks.cpu().numpy(), torch.cat((bs_loc_preds[idx].detach().cpu(), bs_dim_preds[idx].exp().detach().cpu()), dim = 0).numpy(), bs_pose_preds[idx].detach().cpu().numpy(), color=(0,255,0), thickness=2)
-            # draw labels
-            gt_corners_2d, gt_corners_3d = get_cuboid_verts(K = Ks, box3d = torch.cat((bs_loc_gts, bs_dim_gts), dim = 1), R = bs_pose_gts)
-            gt_corners_2d = gt_corners_2d[:, :, :2].detach()
-            gt_box2d = torch.cat((gt_corners_2d.min(dim = 1)[0], gt_corners_2d.max(dim = 1)[0]), dim = -1)
-            #for box in gt_box2d:
-            #    box = box.detach().cpu().numpy().astype(np.int32)
-            #    cv2.rectangle(img, (box[0], box[1]), (box[2], box[3]), (255, 0, 0), 2)
-            for idx in range(bs_loc_gts.shape[0]):
-                draw_3d_box(img, Ks.cpu().numpy(), torch.cat((bs_loc_gts[idx].detach().cpu(), bs_dim_gts[idx].detach().cpu()), dim = 0).numpy(), bs_pose_gts[idx].detach().cpu().numpy(), color=(0,0,255), thickness=2)
-            gt_boxes3D = batched_inputs[bs]['instances']._fields['gt_boxes3D']
-            #gt_proj_centers = gt_boxes3D[:, 0:2]    # The projected 3D centers have been resized.
-            #for gt_proj_center in gt_proj_centers:
-            #    cv2.circle(img, gt_proj_center.cpu().numpy().astype(np.int32), radius = 3, color = (0, 0, 255), thickness = -1)
-            cv2.imwrite('vis.png', img)
-            pdb.set_trace()'''
-            
+            '''if dec_idx == 5:
+                from cubercnn.vis.vis import draw_3d_box
+                img = batched_inputs[bs]['image'].permute(1, 2, 0).numpy()
+                img = np.ascontiguousarray(img)
+                img_reso = torch.cat((ori_img_resolution[bs], ori_img_resolution[bs]), dim = 0)
+                initial_w, initial_h = batched_inputs[bs]['width'], batched_inputs[bs]['height']
+                initial_reso = torch.Tensor([initial_w, initial_h, initial_w, initial_h]).to(img_reso.device)
+                Ks = torch.Tensor(np.array(batched_inputs[bs]['K'])).cuda()
+                Ks[0, :] = Ks[0, :] * ori_img_resolution[bs][0] / initial_w
+                Ks[1, :] = Ks[1, :] * ori_img_resolution[bs][1] / initial_h
+                # draw predictions
+
+                #pred_corners_2d, pred_corners_3d = get_cuboid_verts(K = Ks, box3d = torch.cat((bs_loc_preds, bs_dim_preds.exp()), dim = 1), R = bs_pose_preds)
+                #pred_corners_2d = pred_corners_2d[:, :, :2].detach()
+                #pred_box2d = torch.cat((pred_corners_2d.min(dim = 1)[0], pred_corners_2d.max(dim = 1)[0]), dim = -1)
+                #for box in pred_box2d:
+                #    box = box.detach().cpu().numpy().astype(np.int32)
+                #    cv2.rectangle(img, (box[0], box[1]), (box[2], box[3]), (0, 255, 0), 2)
+                pdb.set_trace()
+                for idx in range(bs_loc_preds.shape[0]):
+                    draw_3d_box(img, Ks.cpu().numpy(), torch.cat((bs_loc_preds[idx].detach().cpu(), bs_dim_preds[idx].exp().detach().cpu()), dim = 0).numpy(), bs_pose_preds[idx].detach().cpu().numpy(), color=(0,255,0), thickness=2)
+                # draw labels
+                #gt_corners_2d, gt_corners_3d = get_cuboid_verts(K = Ks, box3d = torch.cat((bs_loc_gts, bs_dim_gts), dim = 1), R = bs_pose_gts)
+                #gt_corners_2d = gt_corners_2d[:, :, :2].detach()
+                #gt_box2d = torch.cat((gt_corners_2d.min(dim = 1)[0], gt_corners_2d.max(dim = 1)[0]), dim = -1)
+                #for box in gt_box2d:
+                #    box = box.detach().cpu().numpy().astype(np.int32)
+                #    cv2.rectangle(img, (box[0], box[1]), (box[2], box[3]), (255, 0, 0), 2)
+                for idx in range(bs_loc_gts.shape[0]):
+                    draw_3d_box(img, Ks.cpu().numpy(), bs_cls_gts[idx].item(), torch.cat((bs_loc_gts[idx].detach().cpu(), bs_dim_gts[idx].detach().cpu()), dim = 0).numpy(), bs_pose_gts[idx].detach().cpu().numpy(), \
+                        color=(0,200,0), thickness=2, draw_face = True, category_color = True, category_names = MetadataCatalog.get('omni3d_model').thing_classes)
+                cv2.imwrite('vis.png', img)
+                pdb.set_trace()'''
+                
             # Classification loss
             bs_cls_gts_onehot = bs_cls_gts.new_zeros((self.num_query, self.total_cls_num))   # Left shape: (num_query, num_cls)
             bs_valid_cls_gts_onehot = F.one_hot(bs_cls_gts, num_classes = self.total_cls_num) # Left shape: (num_gt, num_cls)

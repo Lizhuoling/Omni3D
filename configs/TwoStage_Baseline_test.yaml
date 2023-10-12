@@ -1,10 +1,8 @@
 _BASE_: "Base_Omni3D_demo.yaml"
 
 DATASETS:
-  #TRAIN: ('SUNRGBD_train', 'SUNRGBD_val', 'Hypersim_train', 'Hypersim_val', 'ARKitScenes_train', 'ARKitScenes_val', 'Objectron_train', 'Objectron_val', 'nuScenes_train', 'nuScenes_val', 'KITTI_train', 'KITTI_val', 'SUNRGBD_test', 'Hypersim_test', 'ARKitScenes_test', 'Objectron_test', 'KITTI_test', 'nuScenes_test')
-  TRAIN: ('SUNRGBD_val',)
-  #TEST: ('SUNRGBD_test', 'Hypersim_test', 'ARKitScenes_test', 'Objectron_test', 'KITTI_test', 'nuScenes_test')
-  TEST: ('SUNRGBD_val',)
+  TRAIN: ('SUNRGBD_test', 'Hypersim_test', 'ARKitScenes_test', 'Objectron_test', 'KITTI_test', 'nuScenes_test')
+  TEST: ('SUNRGBD_test', 'Hypersim_test', 'ARKitScenes_test', 'Objectron_test', 'KITTI_test', 'nuScenes_test')
   CATEGORY_NAMES: ('chair', 'table', 'cabinet', 'car', 'lamp', 'books', 'sofa', 'pedestrian', 'picture', 'window', 'pillow', 'truck', 'door', 'blinds', 'sink', 'shelves', 'television', 'shoes', 'cup', 'bottle', 'bookcase', 'laptop', 'desk', 'cereal box', 'floor mat', 'traffic cone', 'mirror', 'barrier', 'counter', 'camera', 'bicycle', 'toilet', 'bus', 'bed', 'refrigerator', 'trailer', 'box', 'oven', 'clothes', 'van', 'towel', 'motorcycle', 'night stand', 'stove', 'machine', 'stationery', 'bathtub', 'cyclist', 'curtain', 'bin')
   DATASET_ID_GROUP: [[0, 1, 2], [3, 4, 5], [6, 7, 8], [9, 10, 11], [12, 13, 14], [15, 16, 17],]
   DATA_RATIO: 1.0
@@ -15,11 +13,11 @@ INPUT:
   COLOR_AUG: True
 
 SOLVER:
-  IMS_PER_BATCH: 16 #96
+  IMS_PER_BATCH: 64
   TYPE: "mmcv_AdamW"
-  BASE_LR: 8e-4
+  BASE_LR: 4e-4
   WEIGHT_DECAY: 1e-2
-  MAX_ITER: 58000
+  MAX_ITER: 29000
   VIRTUAL_EPOCHS: 20
   VIRTUAL_LOSS: 2.0   # To avoid the total loss is too small.
 
@@ -34,7 +32,7 @@ SOLVER:
     NORM_TYPE: 2.0
 
 TEST:
-  EVAL_PERIOD: 29000
+  EVAL_PERIOD: 14500
 
 MODEL:
   META_ARCHITECTURE: "OV_3D_Det"
@@ -46,7 +44,7 @@ MODEL:
     PETR:
       GRID_MASK: False
 
-      BACKBONE_NAME: 'VoVNet'
+      BACKBONE_NAME: 'ConvNext_Base'
       BACKBONE_FP16: False
       NECK_NAME: 'SECONDFPN'
       TRANSFORMER_NAME: 'DEFORMABLE_TRANSFORMER'

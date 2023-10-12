@@ -456,10 +456,10 @@ def main(args):
         priors = None
 
     # This transformation process should only be performed for once.
-    datasets_cls_dict = MetadataCatalog.get('omni3d_model').datasets_cls_dict
+    '''datasets_cls_dict = MetadataCatalog.get('omni3d_model').datasets_cls_dict
     for dataset_key in datasets_cls_dict.keys():
         datasets_cls_dict[dataset_key] = [dataset_id_to_contiguous_id[ele] for ele in datasets_cls_dict[dataset_key]]
-    MetadataCatalog.get('omni3d_model').datasets_cls_dict = datasets_cls_dict
+    MetadataCatalog.get('omni3d_model').datasets_cls_dict = datasets_cls_dict'''
     
     '''
     The training loops can attempt to train for N times.
