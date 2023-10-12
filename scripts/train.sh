@@ -1,4 +1,8 @@
+<<<<<<< HEAD
 exp_id=TwoStage_Baseline_test
+=======
+exp_id=TwoStage_omni3d_quasibevformer
+>>>>>>> a503d437b423f309c5a1d2eb494fc8b33c196a91
 
 #ulimit -n 65536
 
